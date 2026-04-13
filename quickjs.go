@@ -1698,17 +1698,17 @@ type moduleLoaderState struct {
 }
 
 // jsMallocString allocates a C string using the QuickJS allocator so that QuickJS
-// can safely call js_free() on it without corrupting the heap state.
+// can safely call js_free() on it. We use lib.Xjs_strdup to let the C side handle
+// the 32-bit/64-bit memory tracking alignment natively.
 func jsMallocString(tls *libc.TLS, ctx uintptr, s string) uintptr {
-	b := []byte(s)
-	size := libc.Tsize_t(len(b) + 1)
-	ptr := lib.Xjs_malloc(tls, ctx, size)
-	if ptr != 0 {
-		slice := unsafe.Slice((*byte)(unsafe.Pointer(ptr)), len(b)+1)
-		copy(slice, b)
-		slice[len(b)] = 0
+	temp, err := libc.CString(s)
+	if err != nil {
+		return 0
 	}
-	return ptr
+	defer libc.Xfree(tls, temp)
+
+	// Duplicate the string natively into the QuickJS memory pool
+	return lib.Xjs_strdup(tls, ctx, temp)
 }
 
 // SetModuleLoader configures custom Go functions to load and normalize Javascript modules.
@@ -1735,8 +1735,15 @@ func (m *VM) SetModuleLoader(loader ModuleLoaderFunc, normalize ModuleNormalizeF
 		normFp = fp(customModuleNormalize)
 	}
 
-	// We pass m.runtime.cRuntime as the opaque pointer so the callbacks can resolve the *VM.
-	lib.XJS_SetModuleLoaderFunc2(m.runtime.tls, m.runtime.cRuntime, normFp, fp(customModuleLoader), 0, m.runtime.cRuntime)
+	// FIX: Pass m.runtime.cRuntime to BOTH opaque slots!
+	lib.XJS_SetModuleLoaderFunc2(
+		m.runtime.tls,
+		m.runtime.cRuntime,
+		normFp,
+		fp(customModuleLoader),
+		0,
+		m.runtime.cRuntime, // opaque
+	)
 }
 
 func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_name uintptr, opaque uintptr) uintptr {

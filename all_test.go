@@ -860,7 +860,7 @@ func TestCustomModuleLoader(t *testing.T) {
 
 	// Teardown: Verify we can remove the module loader without crashing
 	vm.SetModuleLoader(nil, nil)
-	
+
 	// FIX: Request a completely new module name so QuickJS doesn't use the cache
 	_, err = vm.Eval(`import { multiply } from "new_missing_module";`, EvalModule)
 	if err == nil {
