@@ -104,23 +104,10 @@ var (
 	goFuncs   = map[int32]*goFunc{}
 	freeMagic = map[int32]struct{}{}
 
-	// Registry for mapping C Context pointers back to the Go VM struct.
-	vmsMu sync.RWMutex
-	vms   = map[uintptr]*VM{}
-
 	// UndefinedValue is a Value representing Javascript value 'undefined'. It is
 	// not associated with any particular VM.
 	UndefinedValue = Value{v: undefined}
 )
-
-// ModuleLoaderFunc defines the signature for a custom module loader.
-// It must return the module's source code (Javascript).
-type ModuleLoaderFunc func(vm *VM, moduleName string) (string, error)
-
-// ModuleNormalizeFunc defines the signature for a custom module normalizer.
-// It receives the base name (the module making the import) and the requested name,
-// and should return the normalized, absolute module name.
-type ModuleNormalizeFunc func(vm *VM, moduleBaseName, moduleName string) (string, error)
 
 // runtime represents a Javascript runtime.
 //
@@ -348,14 +335,12 @@ type VM struct {
 	cContext uintptr // lib.TJSContext
 	goFuncs  map[string]int32
 	// Safe to share, not reference counted
-	int32_16        lib.TJSValue
-	int32_2         lib.TJSValue
-	runtime         *runtime
-	timeout         time.Duration
-	interruptData   uintptr
-	toStringArgv    uintptr
-	moduleLoader    ModuleLoaderFunc
-	moduleNormalize ModuleNormalizeFunc
+	int32_16      lib.TJSValue
+	int32_2       lib.TJSValue
+	runtime       *runtime
+	timeout       time.Duration
+	interruptData uintptr
+	toStringArgv  uintptr
 }
 
 // NewVM returns a newly created VM.
@@ -370,10 +355,6 @@ func NewVM() (*VM, error) {
 		rt.close()
 		return nil, err
 	}
-
-	vmsMu.Lock()
-	vms[vm.cContext] = vm
-	vmsMu.Unlock()
 
 	lib.XJS_SetInterruptHandler(rt.tls, rt.cRuntime, fp(interruptHandler), vm.interruptData)
 	return vm, nil
@@ -435,11 +416,6 @@ func (m *VM) SetCanBlock(value bool) {
 func (m *VM) Close() error {
 	tls := m.runtime.tls
 	ctx := m.cContext
-
-	vmsMu.Lock()
-	delete(vms, ctx)
-	vmsMu.Unlock()
-
 	var a []int32
 	var b []*goFunc
 	for _, k := range m.goFuncs {
@@ -1101,19 +1077,6 @@ func throwInternalError(tls *libc.TLS, ctx uintptr, msg string, args ...any) (r 
 	return lib.XJS_ThrowInternalError(tls, ctx, p, libc.VaList(bp+8, args...))
 }
 
-func throwReferenceError(tls *libc.TLS, ctx uintptr, msg string, args ...any) (r lib.TJSValue) {
-	p, err := libc.CString(msg)
-	if err != nil {
-		return lib.XJS_ThrowReferenceError(tls, ctx, 0, 0)
-	}
-	defer libc.Xfree(tls, p)
-
-	bp := tls.Alloc(8 + 8*len(args))
-	defer tls.Free(8 + 8*len(args))
-
-	return lib.XJS_ThrowReferenceError(tls, ctx, p, libc.VaList(bp+8, args...))
-}
-
 type goFunc struct {
 	cName        uintptr
 	f            reflect.Value
@@ -1508,108 +1471,6 @@ func (m *VM) jsArrayOf(a []lib.TJSValue) (out lib.TJSValue, err error) {
 // loader.
 func (m *VM) SetDefaultModuleLoader() {
 	lib.XJS_SetModuleLoaderFunc2(m.runtime.tls, m.runtime.cRuntime, 0, fp(lib.Xjs_module_loader), 0, 0)
-}
-
-// SetModuleLoader configures custom Go functions to load and normalize Javascript modules.
-// Passing nil for 'loader' removes the custom loader. If 'normalize' is nil, the engine
-// falls back to the default QuickJS module normalizer.
-func (m *VM) SetModuleLoader(loader ModuleLoaderFunc, normalize ModuleNormalizeFunc) {
-	m.moduleLoader = loader
-	m.moduleNormalize = normalize
-
-	var fpNormalize, fpLoader uintptr
-	if normalize != nil {
-		fpNormalize = fp(goModuleNormalize)
-	}
-	if loader != nil {
-		fpLoader = fp(goModuleLoader)
-	}
-
-	lib.XJS_SetModuleLoaderFunc2(
-		m.runtime.tls,
-		m.runtime.cRuntime,
-		fpNormalize,
-		fpLoader,
-		0,          // check_attrs
-		m.cContext, // Pass context as opaque data for the callback registry lookup
-	)
-}
-
-func goModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name uintptr, module_name uintptr, opaque uintptr) uintptr {
-	vmsMu.RLock()
-	vm := vms[opaque]
-	vmsMu.RUnlock()
-
-	if vm == nil || vm.moduleNormalize == nil {
-		return 0
-	}
-
-	baseName := libc.GoString(module_base_name)
-	name := libc.GoString(module_name)
-
-	normalized, err := vm.moduleNormalize(vm, baseName, name)
-	if err != nil {
-		throwReferenceError(tls, ctx, fmt.Sprintf("could not normalize module '%s': %v", name, err))
-		return 0
-	}
-
-	p, err := libc.CString(normalized)
-	if err != nil {
-		throwInternalError(tls, ctx, "OOM")
-		return 0
-	}
-	defer libc.Xfree(tls, p)
-
-	// QuickJS expects normalize functions to return a string allocated by js_malloc
-	sz := libc.Xstrlen(tls, p) + 1
-	res := lib.Xjs_malloc(tls, ctx, libc.Tsize_t(sz))
-	if res == 0 {
-		throwInternalError(tls, ctx, "OOM")
-		return 0
-	}
-	libc.Xmemcpy(tls, res, p, libc.Tsize_t(sz))
-	return res
-}
-
-func goModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque uintptr) uintptr {
-	vmsMu.RLock()
-	vm := vms[opaque]
-	vmsMu.RUnlock()
-
-	if vm == nil || vm.moduleLoader == nil {
-		return 0
-	}
-
-	name := libc.GoString(module_name)
-	source, err := vm.moduleLoader(vm, name)
-	if err != nil {
-		throwReferenceError(tls, ctx, fmt.Sprintf("module '%s' not found: %v", name, err))
-		return 0
-	}
-
-	ps, err := libc.CString(source)
-	if err != nil {
-		throwInternalError(tls, ctx, "OOM")
-		return 0
-	}
-	defer libc.Xfree(tls, ps)
-
-	flags := int32(lib.MJS_EVAL_TYPE_MODULE | lib.MJS_EVAL_FLAG_COMPILE_ONLY)
-	val := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(source)), module_name, flags)
-
-	if isException(val) {
-		lib.XFreeValue(tls, ctx, val)
-		return 0
-	}
-
-	// JS_Eval with COMPILE_ONLY returns a JSValue containing the JSModuleDef pointer.
-	// Since QuickJS places the payload at offset 0 (for both struct formatting and 64-bit NaN-boxing),
-	// this securely extracts the raw pointer.
-	ptr := *(*uintptr)(unsafe.Pointer(&val))
-
-	// The module is now referenced internally by the engine, free the top-level JSValue shell
-	lib.XFreeValue(tls, ctx, val)
-	return ptr
 }
 
 // Atom is an unique identifier of, for example, a string value. Atom values
