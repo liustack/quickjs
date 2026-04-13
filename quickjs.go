@@ -104,6 +104,9 @@ var (
 	goFuncs   = map[int32]*goFunc{}
 	freeMagic = map[int32]struct{}{}
 
+	customLoadersMu sync.Mutex
+	customLoaders   = map[uintptr]moduleLoaderState{}
+
 	// UndefinedValue is a Value representing Javascript value 'undefined'. It is
 	// not associated with any particular VM.
 	UndefinedValue = Value{v: undefined}
@@ -1245,12 +1248,10 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 	m := info.vm
 	haveArgs := int(argc)
 	if haveArgs < info.minArgs {
-		trc("wantThis=%v haveArgs=%v minArgs=%v maxArgs=%v argc=%v", info.wantThis, haveArgs, info.minArgs, info.maxArgs, argc)
 		return throwTypeError(tls, ctx, fmt.Sprintf("not enough arguments in call to %s", info.name))
 	}
 
 	if info.maxArgs >= 0 && haveArgs > info.maxArgs {
-		// trc("wantThis=%v haveArgs=%v minArgs=%v maxArgs=%v argc=%v", info.wantThis, haveArgs, info.minArgs, info.maxArgs, argc)
 		return throwTypeError(tls, ctx, fmt.Sprintf("too many arguments in call to %s", info.name))
 	}
 
@@ -1690,11 +1691,6 @@ type ModuleLoaderFunc func(vm *VM, moduleName string) (string, error)
 // and should return the normalized, absolute module name.
 type ModuleNormalizeFunc func(vm *VM, moduleBaseName, moduleName string) (string, error)
 
-var (
-	customLoadersMu sync.Mutex
-	customLoaders   = map[uintptr]moduleLoaderState{}
-)
-
 type moduleLoaderState struct {
 	vm        *VM
 	loader    ModuleLoaderFunc
@@ -1740,7 +1736,7 @@ func (m *VM) SetModuleLoader(loader ModuleLoaderFunc, normalize ModuleNormalizeF
 	}
 
 	// We pass m.runtime.cRuntime as the opaque pointer so the callbacks can resolve the *VM.
-	lib.XJS_SetModuleLoaderFunc2(m.runtime.tls, m.runtime.cRuntime, normFp, fp(customModuleLoader), m.runtime.cRuntime, 0)
+	lib.XJS_SetModuleLoaderFunc2(m.runtime.tls, m.runtime.cRuntime, normFp, fp(customModuleLoader), 0, m.runtime.cRuntime)
 }
 
 func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_name uintptr, opaque uintptr) uintptr {
@@ -1763,11 +1759,11 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 
 	normName, err := state.normalize(state.vm, baseName, name)
 	if err != nil {
-		throwTypeError(tls, ctx, "module normalization failed: %v", err)
+		// Format the string completely in Go before passing to the C vararg function
+		throwTypeError(tls, ctx, fmt.Sprintf("module normalization failed: %v", err))
 		return 0
 	}
 
-	// CRITICAL: The returned string MUST be allocated with js_malloc.
 	return jsMallocString(tls, ctx, normName)
 }
 
@@ -1787,7 +1783,8 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 
 	source, err := state.loader(state.vm, name)
 	if err != nil {
-		throwTypeError(tls, ctx, "module load failed: %v", err)
+		// Format the string completely in Go before passing to the C vararg function
+		throwTypeError(tls, ctx, fmt.Sprintf("module load failed: %v", err))
 		return 0
 	}
 
@@ -1802,16 +1799,11 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 	v := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(source)), module_name, flags)
 
 	if isException(v) {
-		// Exception state is already queued on the ctx.
 		lib.XFreeValue(tls, ctx, v)
 		return 0
 	}
 
-	// Extract the JSModuleDef pointer using our architecture-specific helper.
 	ptr := jsvToPtr(v)
-
-	// CRITICAL: QuickJS expects the loader to handle the module reference natively.
-	// We MUST free the JSValue wrapper to prevent memory/reference leaks.
 	lib.XFreeValue(tls, ctx, v)
 
 	return ptr

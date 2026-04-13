@@ -802,7 +802,7 @@ func TestCustomModuleLoader(t *testing.T) {
 		},
 	)
 
-	// 1. Happy Path: Successfully load and execute modules
+	// Happy Path: Successfully load and execute modules
 	script := `
 		import { multiply } from "math_module";
 		import { greeting } from "string_module";
@@ -843,7 +843,7 @@ func TestCustomModuleLoader(t *testing.T) {
 		t.Errorf("expected string result 'Hello from QuickJS!', got %v", strRes)
 	}
 
-	// 2. Error Path: Attempt to load a module that doesn't exist
+	// Error Path: Attempt to load a module that doesn't exist
 	missingScript := `
 		import { something } from "missing_module";
 	`
@@ -858,9 +858,11 @@ func TestCustomModuleLoader(t *testing.T) {
 		t.Errorf("expected error to contain '%s', got: %v", expectedErrFragment, err)
 	}
 
-	// 3. Teardown: Verify we can remove the module loader without crashing
+	// Teardown: Verify we can remove the module loader without crashing
 	vm.SetModuleLoader(nil, nil)
-	_, err = vm.Eval(`import { multiply } from "math_module";`, EvalModule)
+	
+	// FIX: Request a completely new module name so QuickJS doesn't use the cache
+	_, err = vm.Eval(`import { multiply } from "new_missing_module";`, EvalModule)
 	if err == nil {
 		t.Fatal("expected error after removing custom module loader, got nil")
 	}
