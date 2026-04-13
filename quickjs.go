@@ -1735,7 +1735,6 @@ func (m *VM) SetModuleLoader(loader ModuleLoaderFunc, normalize ModuleNormalizeF
 		normFp = fp(customModuleNormalize)
 	}
 
-	// FIX: Pass m.runtime.cRuntime to BOTH opaque slots!
 	lib.XJS_SetModuleLoaderFunc2(
 		m.runtime.tls,
 		m.runtime.cRuntime,
@@ -1767,14 +1766,15 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 	normName, err := state.normalize(state.vm, baseName, name)
 	if err != nil {
 		// Format the string completely in Go before passing to the C vararg function
-		throwTypeError(tls, ctx, fmt.Sprintf("module normalization failed: %v", err))
+		s := fmt.Sprintf("module normalization failed: %v", err)
+		throwTypeError(tls, ctx, "%s", s)
 		return 0
 	}
 
 	return jsMallocString(tls, ctx, normName)
 }
 
-func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque uintptr) uintptr {
+func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque uintptr, attrs lib.TJSValue) uintptr {
 	customLoadersMu.Lock()
 	state, ok := customLoaders[opaque]
 	customLoadersMu.Unlock()
@@ -1791,7 +1791,8 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 	source, err := state.loader(state.vm, name)
 	if err != nil {
 		// Format the string completely in Go before passing to the C vararg function
-		throwTypeError(tls, ctx, fmt.Sprintf("module load failed: %v", err))
+		s := fmt.Sprintf("module load failed: %v", err)
+		throwTypeError(tls, ctx, "%s", s)
 		return 0
 	}
 
