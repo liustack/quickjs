@@ -49,3 +49,8 @@ func tag(v lib.TJSValue) int32 {
 func jsvToFloat64(v lib.TJSValue) (r float64) {
 	return *(*float64)(unsafe.Pointer(&v))
 }
+
+// jsvToPtr extracts the JSModuleDef pointer from a JSValue.
+func jsvToPtr(v lib.TJSValue) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&v))
+}

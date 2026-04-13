@@ -1680,3 +1680,139 @@ func (v Value) IsUndefined() bool {
 func Version() string {
 	return lib.MCONFIG_VERSION
 }
+
+// ModuleLoaderFunc defines the signature for a custom module loader.
+// It must return the module's source code (Javascript).
+type ModuleLoaderFunc func(vm *VM, moduleName string) (string, error)
+
+// ModuleNormalizeFunc defines the signature for a custom module normalizer.
+// It receives the base name (the module making the import) and the requested name,
+// and should return the normalized, absolute module name.
+type ModuleNormalizeFunc func(vm *VM, moduleBaseName, moduleName string) (string, error)
+
+var (
+	customLoadersMu sync.Mutex
+	customLoaders   = map[uintptr]moduleLoaderState{}
+)
+
+type moduleLoaderState struct {
+	vm        *VM
+	loader    ModuleLoaderFunc
+	normalize ModuleNormalizeFunc
+}
+
+// jsMallocString allocates a C string using the QuickJS allocator so that QuickJS
+// can safely call js_free() on it without corrupting the heap state.
+func jsMallocString(tls *libc.TLS, ctx uintptr, s string) uintptr {
+	b := []byte(s)
+	size := libc.Tsize_t(len(b) + 1)
+	ptr := lib.Xjs_malloc(tls, ctx, size)
+	if ptr != 0 {
+		slice := unsafe.Slice((*byte)(unsafe.Pointer(ptr)), len(b)+1)
+		copy(slice, b)
+		slice[len(b)] = 0
+	}
+	return ptr
+}
+
+// SetModuleLoader configures custom Go functions to load and normalize Javascript modules.
+// Passing nil for 'loader' removes the custom loader. If 'normalize' is nil, the engine
+// falls back to the default QuickJS module normalizer.
+func (m *VM) SetModuleLoader(loader ModuleLoaderFunc, normalize ModuleNormalizeFunc) {
+	customLoadersMu.Lock()
+	defer customLoadersMu.Unlock()
+
+	if loader == nil {
+		delete(customLoaders, m.runtime.cRuntime)
+		lib.XJS_SetModuleLoaderFunc2(m.runtime.tls, m.runtime.cRuntime, 0, 0, 0, 0)
+		return
+	}
+
+	customLoaders[m.runtime.cRuntime] = moduleLoaderState{
+		vm:        m,
+		loader:    loader,
+		normalize: normalize,
+	}
+
+	var normFp uintptr
+	if normalize != nil {
+		normFp = fp(customModuleNormalize)
+	}
+
+	// We pass m.runtime.cRuntime as the opaque pointer so the callbacks can resolve the *VM.
+	lib.XJS_SetModuleLoaderFunc2(m.runtime.tls, m.runtime.cRuntime, normFp, fp(customModuleLoader), m.runtime.cRuntime, 0)
+}
+
+func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_name uintptr, opaque uintptr) uintptr {
+	customLoadersMu.Lock()
+	state, ok := customLoaders[opaque]
+	customLoadersMu.Unlock()
+
+	if !ok || state.normalize == nil {
+		return 0
+	}
+
+	baseName := ""
+	if module_base_name != 0 {
+		baseName = libc.GoString(module_base_name)
+	}
+	name := ""
+	if module_name != 0 {
+		name = libc.GoString(module_name)
+	}
+
+	normName, err := state.normalize(state.vm, baseName, name)
+	if err != nil {
+		throwTypeError(tls, ctx, "module normalization failed: %v", err)
+		return 0
+	}
+
+	// CRITICAL: The returned string MUST be allocated with js_malloc.
+	return jsMallocString(tls, ctx, normName)
+}
+
+func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque uintptr) uintptr {
+	customLoadersMu.Lock()
+	state, ok := customLoaders[opaque]
+	customLoadersMu.Unlock()
+
+	if !ok || state.loader == nil {
+		return 0
+	}
+
+	name := ""
+	if module_name != 0 {
+		name = libc.GoString(module_name)
+	}
+
+	source, err := state.loader(state.vm, name)
+	if err != nil {
+		throwTypeError(tls, ctx, "module load failed: %v", err)
+		return 0
+	}
+
+	ps, err := libc.CString(source)
+	if err != nil {
+		throwInternalError(tls, ctx, "OOM")
+		return 0
+	}
+	defer libc.Xfree(tls, ps)
+
+	flags := int32(lib.MJS_EVAL_TYPE_MODULE | lib.MJS_EVAL_FLAG_COMPILE_ONLY)
+	v := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(source)), module_name, flags)
+
+	if isException(v) {
+		// Exception state is already queued on the ctx.
+		lib.XFreeValue(tls, ctx, v)
+		return 0
+	}
+
+	// Extract the JSModuleDef pointer using our architecture-specific helper.
+	ptr := jsvToPtr(v)
+
+	// CRITICAL: QuickJS expects the loader to handle the module reference natively.
+	// We MUST free the JSValue wrapper to prevent memory/reference leaks.
+	lib.XFreeValue(tls, ctx, v)
+
+	return ptr
+}

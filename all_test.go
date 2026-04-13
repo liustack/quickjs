@@ -12,6 +12,7 @@ import (
 	"os"
 	goruntime "runtime"
 	"runtime/debug"
+	"strings"
 	"testing"
 	"time"
 
@@ -760,5 +761,107 @@ func TestBytecode(t *testing.T) {
 
 	if g, e := v, 42*314; g != e {
 		t.Fatal(g, e)
+	}
+}
+
+func TestCustomModuleLoader(t *testing.T) {
+	vm, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vm.Close()
+
+	// An in-memory filesystem for our mock modules
+	modules := map[string]string{
+		"math_module": `
+			export function multiply(a, b) {
+				return a * b;
+			}
+		`,
+		"string_module": `
+			export const greeting = "Hello from QuickJS!";
+		`,
+	}
+
+	normalizeCalled := false
+	loaderCalled := false
+
+	vm.SetModuleLoader(
+		func(m *VM, name string) (string, error) {
+			loaderCalled = true
+			if src, ok := modules[name]; ok {
+				return src, nil
+			}
+			return "", fmt.Errorf("module not found: %s", name)
+		},
+		func(m *VM, baseName, name string) (string, error) {
+			normalizeCalled = true
+			// A real normalizer would resolve relative paths against baseName.
+			// For this test, we just pass the requested name through.
+			return name, nil
+		},
+	)
+
+	// 1. Happy Path: Successfully load and execute modules
+	script := `
+		import { multiply } from "math_module";
+		import { greeting } from "string_module";
+
+		// Export results to the global object so we can assert them from Go
+		globalThis.testMathResult = multiply(6, 7);
+		globalThis.testStringResult = greeting;
+	`
+
+	_, err = vm.Eval(script, EvalModule)
+	if err != nil {
+		t.Fatalf("EvalModule failed: %v", err)
+	}
+
+	if !normalizeCalled {
+		t.Error("expected normalize callback to be called, but it was not")
+	}
+
+	if !loaderCalled {
+		t.Error("expected loader callback to be called, but it was not")
+	}
+
+	// Verify the math module executed correctly
+	mathRes, err := vm.Eval("testMathResult", EvalGlobal)
+	if err != nil {
+		t.Fatalf("failed to evaluate testMathResult: %v", err)
+	}
+	if v, ok := mathRes.(int); !ok || v != 42 {
+		t.Errorf("expected math result 42, got %v (type %T)", mathRes, mathRes)
+	}
+
+	// Verify the string module executed correctly
+	strRes, err := vm.Eval("testStringResult", EvalGlobal)
+	if err != nil {
+		t.Fatalf("failed to evaluate testStringResult: %v", err)
+	}
+	if v, ok := strRes.(string); !ok || v != "Hello from QuickJS!" {
+		t.Errorf("expected string result 'Hello from QuickJS!', got %v", strRes)
+	}
+
+	// 2. Error Path: Attempt to load a module that doesn't exist
+	missingScript := `
+		import { something } from "missing_module";
+	`
+	_, err = vm.Eval(missingScript, EvalModule)
+	if err == nil {
+		t.Fatal("expected error when loading missing module, got nil")
+	}
+
+	// Ensure the error message propagated properly from the Go loader to the JS Exception
+	expectedErrFragment := "module not found: missing_module"
+	if !strings.Contains(err.Error(), expectedErrFragment) && !strings.Contains(err.Error(), "module load failed") {
+		t.Errorf("expected error to contain '%s', got: %v", expectedErrFragment, err)
+	}
+
+	// 3. Teardown: Verify we can remove the module loader without crashing
+	vm.SetModuleLoader(nil, nil)
+	_, err = vm.Eval(`import { multiply } from "math_module";`, EvalModule)
+	if err == nil {
+		t.Fatal("expected error after removing custom module loader, got nil")
 	}
 }
