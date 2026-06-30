@@ -481,6 +481,48 @@ func (m *VM) Eval(javascript string, flags int) (r any, err error) {
 	return m.value(lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(javascript)), uintptr(unsafe.Pointer(&evalFN)), int32(flags)), true)
 }
 
+// ExecutePendingJobs runs queued Javascript jobs — Promise reactions (the
+// .then/.catch/.finally callbacks) and async/await continuations — until the
+// queue is empty, returning the number of jobs executed. The runtime does not run
+// these itself: an embedding event loop calls ExecutePendingJobs at the end of
+// each turn to drain the microtask queue (so a resolved Promise's .then runs, a
+// pending await resumes, etc.). An exception thrown by a job is returned as an
+// error — the first one — while the remaining jobs still run; a self-feeding job
+// queue is bounded so it cannot hang the host.
+func (m *VM) ExecutePendingJobs() (n int, err error) {
+	tls := m.runtime.tls
+	rt := m.runtime.cRuntime
+
+	// pctx receives the context of a throwing job; with a single context per VM its
+	// value is not otherwise needed. It is a pointer to one JSContext*.
+	pctx := libc.Xcalloc(tls, 1, libc.Tsize_t(unsafe.Sizeof(uintptr(0))))
+	if pctx == 0 {
+		return 0, fmt.Errorf("OOM")
+	}
+
+	defer libc.Xfree(tls, pctx)
+
+	const maxJobs = 1 << 20 // bound a self-feeding microtask loop so it cannot hang the host
+	for n < maxJobs {
+		r := lib.XJS_ExecutePendingJob(tls, rt, pctx)
+		if r == 0 {
+			return n, err // queue drained
+		}
+
+		n++
+		if r < 0 {
+			if e := m.errFromException(); e != nil && err == nil {
+				err = e // report the first failure, keep draining the rest
+			}
+		}
+	}
+
+	if err == nil {
+		err = fmt.Errorf("quickjs: aborted draining after %d pending jobs", maxJobs)
+	}
+	return n, err
+}
+
 // EvalThis is like eval but sets javascript 'this' to 'obj'.
 func (m *VM) EvalThis(obj Value, javascript string, flags int) (r any, err error) {
 	defer obj.Free()
