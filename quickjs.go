@@ -1094,6 +1094,7 @@ type goFunc struct {
 	maxArgs int
 
 	wantThis bool
+	hostFunc bool
 }
 
 // RegisterFunc registers a Go function 'f' and makes it callable from
@@ -1121,7 +1122,42 @@ type goFunc struct {
 //
 // Note: The 'name' argument should be a valid Javascript identifier. It is not
 // currently enforced but this may change later.
-func (m *VM) RegisterFunc(name string, f any, wantThis bool) (err error) {
+//
+// For binding host objects (a DOM, console, fetch, …) prefer RegisterHostFunc,
+// which gives the more convenient single-return / error-throws-exception shape.
+func (m *VM) RegisterFunc(name string, f any, wantThis bool) error {
+	return m.registerFunc(name, f, wantThis, false)
+}
+
+// HostFunc is a Go function exposed to JavaScript by RegisterHostFunc. It
+// receives the call arguments already converted to Go values and returns a
+// single value to convert back to JS, or a non-nil error which is thrown as a
+// JavaScript exception.
+type HostFunc func(args []any) (any, error)
+
+// RegisterHostFunc exposes fn to JavaScript as a global function named name,
+// using the calling convention an embedding host wants: every JS call argument
+// arrives in the single []any slice (already converted to Go values), fn returns
+// exactly one value to convert back to JS, and a non-nil error is thrown as a
+// JavaScript exception.
+//
+// This differs from RegisterFunc, whose reflection mapping turns a Go
+// multiple-return into a JS array and converts a returned error like any other
+// value (so a (value, error) pair becomes the array [value, error] rather than a
+// value-or-throw). RegisterHostFunc is the better fit for binding host objects;
+// RegisterFunc remains for direct, typed Go calls.
+func (m *VM) RegisterHostFunc(name string, fn HostFunc) error {
+	if fn == nil {
+		return fmt.Errorf("host func %q cannot be nil", name)
+	}
+
+	// Register a variadic adapter so every JS argument is collected into the one
+	// []any; the host flag makes callGo return fn's value directly and throw on a
+	// non-nil error, instead of array-wrapping the (value, error) pair.
+	return m.registerFunc(name, func(args ...any) (any, error) { return fn(args) }, false, true)
+}
+
+func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 	if name == "" {
 		return fmt.Errorf("func name cannot be empty")
 	}
@@ -1162,6 +1198,7 @@ func (m *VM) RegisterFunc(name string, f any, wantThis bool) (err error) {
 		variadicType: vt,
 		vm:           m,
 		wantThis:     wantThis,
+		hostFunc:     host,
 	}
 	for i := 0; i < typ.NumIn(); i++ {
 		info.in = append(info.in, typ.In(i))
@@ -1310,6 +1347,21 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 
 	out := info.f.Call(in)
 	var err error
+
+	// A host function (RegisterHostFunc) has the fixed shape func(...any) (any,
+	// error): return its single value, or throw a JS exception for a non-nil
+	// error — rather than array-wrapping the (value, error) pair.
+	if info.hostFunc {
+		if e, _ := out[1].Interface().(error); e != nil {
+			return throwTypeError(tls, ctx, "%s", e.Error())
+		}
+		r, err = m.jsValue(out[0])
+		if err != nil {
+			return throwTypeError(tls, ctx, "%s", fmt.Sprintf("callback %s: %v", info.name, err))
+		}
+		return r
+	}
+
 	switch len(info.out) {
 	case 0:
 		return undefined
