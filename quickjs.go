@@ -400,11 +400,13 @@ func (m *VM) SetGCThreshold(threshold uintptr) {
 	lib.XJS_SetGCThreshold(m.runtime.tls, m.runtime.cRuntime, libc.Tsize_t(threshold))
 }
 
-//TODO(jnml) needs changes in libquicjs stack slot checking.
-// SetMaxStackSize limits m's maxmimum stack depth, in stack frames.
-// func (m *VM) SetMaxStackSize(threshold uintptr) {
-// 	lib.XJS_SetMaxStackSize(m.runtime.tls, m.runtime.cRuntime, libc.Tsize_t(threshold))
-// }
+// SetMaxStackSize limits the JS call depth, in libc.TLS stack slots (~one per JS
+// call frame in the CGo-free port). Deep recursion then throws a catchable
+// RangeError instead of overflowing the Go goroutine stack. 0 restores the
+// MaxStackSlots default.
+func (m *VM) SetMaxStackSize(threshold uintptr) {
+	lib.XJS_SetMaxStackSize(m.runtime.tls, m.runtime.cRuntime, libc.Tsize_t(threshold))
+}
 
 // SetCanBlock configures m's blocking mode.
 func (m *VM) SetCanBlock(value bool) {
