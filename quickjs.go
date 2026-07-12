@@ -504,6 +504,12 @@ func (m *VM) ExecutePendingJobs() (n int, err error) {
 
 	defer libc.Xfree(tls, pctx)
 
+	// Re-arm the eval-timeout deadline, as the Eval* functions do. Draining runs JS
+	// (Promise reactions and async continuations), so without this the whole drain
+	// inherits a stale wall-clock deadline from the last Eval — one that has kept
+	// ticking through idle time — and is spuriously interrupted.
+	m.configureInterrupt()
+
 	const maxJobs = 1 << 20 // bound a self-feeding microtask loop so it cannot hang the host
 	for n < maxJobs {
 		r := lib.XJS_ExecutePendingJob(tls, rt, pctx)
@@ -757,6 +763,12 @@ func (m *VM) Call(function string, args ...any) (r any, err error) {
 
 	defer libc.Xfree(tls, ps)
 
+	// Re-arm the eval-timeout deadline, as the Eval* functions do: Call runs JS (it
+	// evaluates the function reference and invokes it), so without this the wall-clock
+	// deadline set by the last Eval keeps ticking through idle time and interrupts a
+	// later Call that has not itself run long.
+	m.configureInterrupt()
+
 	f := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(function)), uintptr(unsafe.Pointer(&evalFN)), int32(EvalGlobal))
 
 	defer lib.XFreeValue(tls, ctx, f)
@@ -781,6 +793,9 @@ func (m *VM) CallValue(function string, args ...any) (r Value, err error) {
 	}
 
 	defer libc.Xfree(tls, ps)
+
+	// Re-arm the eval-timeout deadline, as the Eval* functions do (see Call).
+	m.configureInterrupt()
 
 	f := lib.XJS_Eval(tls, ctx, ps, libc.Tsize_t(len(function)), uintptr(unsafe.Pointer(&evalFN)), int32(EvalGlobal))
 
