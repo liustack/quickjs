@@ -22,27 +22,51 @@ func TestCallRearmsEvalTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	if err := m.SetEvalTimeout(50 * time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
 
-	// A quick function that still loops enough to reach an interrupt check.
+	// quick loops enough to reach an interrupt check, so the wall-clock deadline is
+	// actually consulted while it runs. Its absolute runtime is deliberately kept out
+	// of the pass/fail decision below (see the widen step): on a slow emulated builder
+	// the loop alone can take >100ms, which must not be confused with a stale deadline.
 	if _, err := m.Eval("globalThis.quick = function(){ var s=0; for (var i=0;i<100000;i++) s+=i; return s }", EvalGlobal); err != nil {
 		t.Fatal(err)
 	}
 
-	// Idle well past the deadline, then dispatch: previously interrupted; now re-armed.
-	time.Sleep(120 * time.Millisecond)
+	// Arm a short deadline, then idle well past it. SetEvalTimeout only records the
+	// duration; the live deadline is (re-)armed by configureInterrupt inside the
+	// eval-family entry points, so after this idle the live deadline is in the past
+	// and the next such entry point is born already interrupted unless it re-arms.
+	const short = 50 * time.Millisecond
+	if err := m.SetEvalTimeout(short); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Eval("0", EvalGlobal); err != nil { // cheapest way to arm the deadline
+		t.Fatal(err)
+	}
+	time.Sleep(short + 70*time.Millisecond)
+
+	// Widen the budget before dispatching. Because the live deadline is untouched by
+	// SetEvalTimeout, a regressed Call/ExecutePendingJobs keeps the stale, already
+	// elapsed short deadline and is interrupted, while a correct one re-arms to this
+	// wide budget. quick's own runtime cannot make that fail spuriously now: any
+	// bounded loop finishes far inside a multi-second budget even on the slowest
+	// emulated builders. (Before widening, quick racing the 50ms budget is exactly
+	// what made this test fail on slow hardware, e.g. linux/s390x.)
+	const wide = 10 * time.Second
+	if err := m.SetEvalTimeout(wide); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.Call("quick"); err != nil {
 		t.Fatalf("Call after idle was interrupted: %v", err)
 	}
-	time.Sleep(120 * time.Millisecond)
 	if _, err := m.ExecutePendingJobs(); err != nil {
 		t.Fatalf("ExecutePendingJobs after idle errored: %v", err)
 	}
 
-	// The guard is preserved: a Call that genuinely runs past the timeout is still
-	// interrupted (re-arming grants a fresh budget, it does not remove the limit).
+	// The guard is preserved: re-arming grants a fresh budget, it does not remove the
+	// limit. Under a short budget a genuinely runaway Call is still interrupted.
+	if err := m.SetEvalTimeout(short); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.Eval("globalThis.runaway = function(){ for (;;) {} }", EvalGlobal); err != nil {
 		t.Fatal(err)
 	}
