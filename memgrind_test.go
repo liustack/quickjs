@@ -107,6 +107,8 @@ func TestMemgrind2(t *testing.T) {
 	t.Run("valueCall", TestValueCall)
 	t.Run("valueCallErrors", TestValueCallErrors)
 	t.Run("valueCallPromise", TestValueCallPromise)
+	t.Run("nullArg", TestRegisterFuncNullArg)
+	t.Run("nullArgHost", TestRegisterHostFuncNullArg)
 
 	if err := libc.MemAuditReport(); err != nil {
 		t.Fatal(err)

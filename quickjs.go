@@ -1326,6 +1326,19 @@ func isNative(t reflect.Type) bool {
 	return t == rvt
 }
 
+// canBeNil reports whether nil is a valid value of type 't'. Javascript null
+// converts to a Go nil, so it can be passed only to a parameter able to hold
+// one. Coercing it to the zero value of, say, string or int would silently
+// make f(null) indistinguishable from f("") or f(0).
+func canBeNil(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return true
+	}
+
+	return false
+}
+
 func fp(f interface{}) uintptr {
 	type iface [2]uintptr
 	return (*iface)(unsafe.Pointer(&f))[1]
@@ -1366,9 +1379,14 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 			}
 
 			rv := reflect.ValueOf(v)
-			if !rv.IsValid() {
+			switch {
+			case !rv.IsValid(): // Javascript null, m.value returns a nil any for it.
+				if !canBeNil(info.in[0]) {
+					return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign null to %s", info.name, info.in[0]))
+				}
+
 				rv = reflect.Zero(info.in[0])
-			} else if !rv.Type().AssignableTo(info.in[0]) {
+			case !rv.Type().AssignableTo(info.in[0]):
 				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), info.in[0]))
 			}
 
@@ -1397,9 +1415,14 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 			}
 
 			rv := reflect.ValueOf(v)
-			if !rv.IsValid() {
+			switch {
+			case !rv.IsValid(): // Javascript null, m.value returns a nil any for it.
+				if !canBeNil(typ) {
+					return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign null to %s", info.name, typ))
+				}
+
 				rv = reflect.Zero(typ)
-			} else if !rv.Type().AssignableTo(typ) {
+			case !rv.Type().AssignableTo(typ):
 				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), typ))
 			}
 
@@ -1474,6 +1497,8 @@ func (m *VM) jsValue(in reflect.Value) (out lib.TJSValue, err error) {
 	switch in.Kind() {
 	case reflect.Pointer:
 		return m.jsPtrValue(in)
+	case reflect.Bool:
+		return newBool(in.Bool()), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return jsInt(in.Int()), nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:

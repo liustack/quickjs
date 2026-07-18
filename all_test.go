@@ -453,6 +453,9 @@ func testRegisterGoFuncOK(t *testing.T) {
 		{"", false, func() *int { return nil }, nil, "", nil},
 		{"", false, func() any { i := 495; return &i }, nil, "", 495},
 		{"", false, func() *int { i := 496; return &i }, nil, "", 496},
+		{"", false, func() bool { return true }, nil, "", true},
+		{"", false, func() bool { return false }, nil, "", false},
+		{"", false, func() any { return true }, nil, "", true},
 		{"", false, func() float64 { return 0.5 }, nil, "", 0.5},
 		{"", false, func() float32 { return 2.5 }, nil, "", 2.5},
 		{"", false, func() string { return "2.5" }, nil, "", "2.5"},
@@ -1102,5 +1105,128 @@ func TestValueProperty(t *testing.T) {
 
 	if g, e := v, "bar"; g != e {
 		t.Fatal(g, e)
+	}
+}
+
+// TestRegisterFuncNullArg covers passing Javascript null to a function registered
+// by RegisterFunc. That used to panic in reflect for every parameter type except
+// Value, and the panic leaked memory even when recovered, so there was no way to
+// work around it. null now converts to a Go nil where nil is a valid value of the
+// parameter type and is a type error otherwise, like undefined already was.
+func TestRegisterFuncNullArg(t *testing.T) {
+	type T struct{ A int }
+
+	for i, test := range []struct {
+		f        any
+		wantThis bool
+		call     string
+		v        any
+		err      string
+	}{
+		// nil is a valid value of the parameter type: null converts to it.
+		{func(v any) bool { return v == nil }, false, "f(null)", true, ""},
+		{func(v *T) bool { return v == nil }, false, "f(null)", true, ""},
+		{func(v map[string]any) bool { return v == nil }, false, "f(null)", true, ""},
+		{func(v []int) bool { return v == nil }, false, "f(null)", true, ""},
+		{func(v error) bool { return v == nil }, false, "f(null)", true, ""},
+		{func(v ...any) bool { return len(v) == 1 && v[0] == nil }, false, "f(null)", true, ""},
+		{func(a, b any) bool { return a == nil && b == 42 }, false, "f(null, 42)", true, ""},
+
+		// 'this' can be null as well, a registered function does not coerce it
+		// to the global object.
+		{func(this any) bool { return this == nil }, true, "f.call(null)", true, ""},
+
+		// undefined stays distinct from null.
+		{func(v any) bool { return v == Undefined{} }, false, "f(undefined)", true, ""},
+
+		// nil is not a valid value of the parameter type: a catchable type
+		// error, neither a silent zero value nor a panic.
+		{func(string) {}, false, "f(null)", nil, "cannot assign null to string"},
+		{func(int) {}, false, "f(null)", nil, "cannot assign null to int"},
+		{func(bool) {}, false, "f(null)", nil, "cannot assign null to bool"},
+		{func(float64) {}, false, "f(null)", nil, "cannot assign null to float64"},
+		{func(T) {}, false, "f(null)", nil, "cannot assign null to"},
+		{func(this string) {}, true, "f.call(null)", nil, "cannot assign null to string"},
+	} {
+		func() {
+			m, err := NewVM()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer m.Close()
+
+			if err := m.RegisterFunc("f", test.f, test.wantThis); err != nil {
+				t.Errorf("%v: %s: RegisterFunc: %v", i, test.call, err)
+				return
+			}
+
+			v, err := m.Eval(test.call, EvalGlobal)
+			switch {
+			case test.err != "":
+				if err == nil {
+					t.Errorf("%v: %s: expected an error containing %q, got %v", i, test.call, test.err, v)
+					return
+				}
+
+				if !strings.Contains(err.Error(), test.err) {
+					t.Errorf("%v: %s: got error %q, expected it to contain %q", i, test.call, err, test.err)
+				}
+			default:
+				if err != nil {
+					t.Errorf("%v: %s: %v", i, test.call, err)
+					return
+				}
+
+				if g, e := v, test.v; g != e {
+					t.Errorf("%v: %s: got %v, expected %v", i, test.call, g, e)
+				}
+			}
+		}()
+	}
+}
+
+// TestRegisterHostFuncNullArg is TestRegisterFuncNullArg for the RegisterHostFunc
+// shape, func(args []any) (any, error). Every argument lands in an any there, so
+// null is always valid and must stay distinct from undefined.
+func TestRegisterHostFuncNullArg(t *testing.T) {
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m.Close()
+
+	var got []any
+	if err := m.RegisterHostFunc("h", func(args []any) (any, error) {
+		got = args
+		return len(args), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := m.Eval("h(null, 42, undefined, null)", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, 4; g != e {
+		t.Fatal(g, e)
+	}
+
+	if g, e := len(got), 4; g != e {
+		t.Fatal(g, e)
+	}
+
+	if got[0] != nil || got[3] != nil {
+		t.Errorf("null arguments did not arrive as nil: %#v", got)
+	}
+
+	if g, e := got[1], 42; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := got[2], (Undefined{}); g != e {
+		t.Errorf("undefined must stay distinct from null: got %#v, expected %#v", g, e)
 	}
 }
