@@ -867,3 +867,240 @@ func TestCustomModuleLoader(t *testing.T) {
 		t.Fatal("expected error after removing custom module loader, got nil")
 	}
 }
+
+func TestValueCall(t *testing.T) {
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m.Close()
+
+	f, err := m.EvalValue("(function(a, b) { return this.base + a + b; });", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer f.Free()
+
+	this, err := m.EvalValue("({base: 100});", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer this.Free()
+
+	v, err := f.Call(this, 20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, 123; g != e {
+		t.Fatal(g, e)
+	}
+
+	// 'this' is honored, not silently replaced by the global object.
+	other, err := m.EvalValue("({base: 1000});", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer other.Free()
+
+	if v, err = f.Call(other, 20, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, 1023; g != e {
+		t.Fatal(g, e)
+	}
+
+	// CallValue returns a Value, like EvalValue does.
+	w, err := f.CallValue(this, 20, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer w.Free()
+
+	x, err := w.Any()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := x, 123; g != e {
+		t.Fatal(g, e)
+	}
+
+	// UndefinedValue is accepted as 'this'.
+	h, err := m.EvalValue("(function(s) { return 'got ' + s; });", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer h.Free()
+
+	if v, err = h.Call(UndefinedValue, "it"); err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, "got it"; g != e {
+		t.Fatal(g, e)
+	}
+}
+
+func TestValueCallErrors(t *testing.T) {
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m.Close()
+
+	m2, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m2.Close()
+
+	// A Value not associated with a VM, eg. UndefinedValue, reports an error
+	// instead of panicking on the nil vm.
+	if _, err := UndefinedValue.Call(UndefinedValue); err == nil {
+		t.Error("expected an error calling a Value not associated with a VM")
+	}
+
+	if _, err := UndefinedValue.CallValue(UndefinedValue); err == nil {
+		t.Error("expected an error calling a Value not associated with a VM")
+	}
+
+	obj, err := m.EvalValue("({});", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer obj.Free()
+
+	if _, err := obj.Call(UndefinedValue); err == nil {
+		t.Error("expected an error calling a non-function")
+	}
+
+	if _, err := obj.CallValue(UndefinedValue); err == nil {
+		t.Error("expected an error calling a non-function")
+	}
+
+	// A reference counted 'this' from a different VM is rejected the same way
+	// convertArgs rejects such an argument.
+	f, err := m.EvalValue("(function() { return this.x; });", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer f.Free()
+
+	alien, err := m2.EvalValue("({x: 42});", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer alien.Free()
+
+	if _, err := f.Call(alien); err == nil {
+		t.Error("expected an error using a 'this' from a different VM")
+	}
+
+	if _, err := f.CallValue(alien); err == nil {
+		t.Error("expected an error using a 'this' from a different VM")
+	}
+}
+
+// TestValueCallPromise covers the use case Value.Call was added for: settling a
+// promise from Go using the resolve/reject functions handed to a registered Go
+// function. They outlive that function only because it retains them using Dup.
+func TestValueCallPromise(t *testing.T) {
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m.Close()
+
+	var resolve, reject Value
+	if err := m.RegisterFunc("goAsync", func(res, rej Value) {
+		resolve = res.Dup()
+		reject = rej.Dup()
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.Eval(`
+globalThis.out = 'pending';
+new Promise(function(res, rej) { goAsync(res, rej); }).then(
+	function(v) { globalThis.out = 'ok: ' + v; },
+	function(e) { globalThis.out = 'err: ' + e; }
+);
+`, EvalGlobal); err != nil {
+		t.Fatal(err)
+	}
+
+	defer reject.Free()
+	defer resolve.Free()
+
+	if _, err := resolve.Call(UndefinedValue, "done"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.ExecutePendingJobs(); err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := m.Eval("globalThis.out;", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, "ok: done"; g != e {
+		t.Fatal(g, e)
+	}
+}
+
+func TestValueProperty(t *testing.T) {
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m.Close()
+
+	obj, err := m.EvalValue("var obj = {}; obj;", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer obj.Free()
+
+	atom, err := m.NewAtom("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := m.NewString("bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer n.Free()
+
+	if err := m.SetPropertyValue(obj, atom, n); err != nil {
+		t.Fatal(err)
+	}
+
+	v, err := obj.Property(atom)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, "bar"; g != e {
+		t.Fatal(g, e)
+	}
+}

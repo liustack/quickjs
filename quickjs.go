@@ -1737,8 +1737,17 @@ func (v Value) GetPropertyValue(prop Atom) (r Value, err error) {
 	return v.vm.GetPropertyValue(v, prop)
 }
 
-// GetProperty returns v.prop.
+// GetProperty returns v.prop. The 'this' argument is ignored.
+//
+// Deprecated: The 'this' argument is vestigial, the property is always looked
+// up on 'v'. Use [Value.Property] instead.
 func (v Value) GetProperty(this Value, prop Atom) (r any, err error) {
+	return v.vm.GetProperty(v, prop)
+}
+
+// Property returns v.prop. It is [Value.GetProperty] without the vestigial
+// 'this' argument.
+func (v Value) Property(prop Atom) (r any, err error) {
 	return v.vm.GetProperty(v, prop)
 }
 
@@ -1788,16 +1797,66 @@ func (v Value) IsUndefined() bool {
 	return tag(v.v) == lib.EJS_TAG_UNDEFINED
 }
 
-// Call calls the JS function v with this as the receiver and args as
-// arguments, returning the result unpacked to a Go value.
+// Call evaluates 'v(args...)' with 'this' as the receiver and returns the
+// resulting (value, error). 'v' must be a Javascript function. Pass
+// [UndefinedValue] as 'this' when the function does not use it.
 //
 //	resolve.Call(quickjs.UndefinedValue, "done")
-//	reject.Call(quickjs.UndefinedValue, errors.New("fail"))
+//	reject.Call(quickjs.UndefinedValue, err.Error())
 //
-// Note: v must be a JS function. See the [Value] documentation for details
-// about manual memory management.
-func (v Value) Call(this Value, args ...any) (any, error) {
+// Argument types are converted using the same rules as in [VM.Call] and the
+// result is unpacked using the same rules as there are for the return value of
+// [VM.Eval]. Note that a Go error is not one of the recognized types, so it is
+// marshaled to JSON like any other value — and because the standard error
+// types have no exported fields that yields '{}'. Pass err.Error() instead.
+//
+// Note: A Value passed to a Go function registered by [VM.RegisterFunc] is
+// valid only for the duration of that call. To call it later, for example to
+// settle a promise after the Go function has returned, retain it using
+// [Value.Dup] and release it using [Value.Free] when done.
+//
+// Note: See the [Value] documentation for details about manual memory
+// management of Value objects.
+func (v Value) Call(this Value, args ...any) (r any, err error) {
+	if err = v.checkCall(this); err != nil {
+		return nil, err
+	}
+
+	// Re-arm the eval-timeout deadline, as the Eval* functions do (see VM.Call).
+	v.vm.configureInterrupt()
 	return v.vm.call(v.v, this.v, args...)
+}
+
+// CallValue is like [Value.Call] but returns (Value, error) like
+// [VM.EvalValue].
+//
+// Note: See the [Value] documentation for details about manual memory
+// management of Value objects.
+func (v Value) CallValue(this Value, args ...any) (r Value, err error) {
+	if err = v.checkCall(this); err != nil {
+		return r, err
+	}
+
+	// Re-arm the eval-timeout deadline, as the Eval* functions do (see VM.Call).
+	v.vm.configureInterrupt()
+	return v.vm.callValue(v.v, this.v, args...)
+}
+
+// checkCall validates the receiver and 'this' of the Value call methods. It
+// reports the problem as an error rather than panicking in v.vm because both
+// callers already return one.
+func (v Value) checkCall(this Value) error {
+	if v.vm == nil {
+		return fmt.Errorf("cannot call a Value not associated with a VM")
+	}
+
+	// Same test as in convertArgs: values with a reference count, ie. those
+	// belonging to a particular runtime heap, must not cross VMs.
+	if this.vm != v.vm && tag(this.v) < 0 {
+		return fmt.Errorf("cannot use a Value from a different VM")
+	}
+
+	return nil
 }
 
 // Version returns the underlying QuickJS version.

@@ -102,7 +102,11 @@ func TestMemgrind2(t *testing.T) {
 	t.Run("setPropValue", TestSetPropertyValue)
 	t.Run("setProp", TestSetProperty)
 	t.Run("getPropValue", TestGetPropertyValue)
-	t.Run("getProp", TestGetPropertyValue)
+	t.Run("getProp", TestGetProperty)
+	t.Run("prop", TestValueProperty)
+	t.Run("valueCall", TestValueCall)
+	t.Run("valueCallErrors", TestValueCallErrors)
+	t.Run("valueCallPromise", TestValueCallPromise)
 
 	if err := libc.MemAuditReport(); err != nil {
 		t.Fatal(err)
