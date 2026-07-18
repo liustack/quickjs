@@ -1230,3 +1230,122 @@ func TestRegisterHostFuncNullArg(t *testing.T) {
 		t.Errorf("undefined must stay distinct from null: got %#v, expected %#v", g, e)
 	}
 }
+
+// TestRegisterFuncMapResult covers returning a Go map from a registered function.
+// That used to fail with "internal error: map". Map values are converted one by
+// one, the way slice elements are and unlike struct fields, which go through a
+// JSON round trip that turns a *big.Int into a double and fails outright on a
+// Value.
+func TestRegisterFuncMapResult(t *testing.T) {
+	big62 := new(big.Int).Lsh(big.NewInt(1), 62) // exceeds 2**53, unrepresentable as a double
+
+	for i, test := range []struct {
+		f    any
+		call string
+		v    any
+		err  string
+	}{
+		{func() map[string]int { return map[string]int{"a": 1, "b": 2} }, "JSON.stringify(f())", `{"a":1,"b":2}`, ""},
+		{func() map[string]int { return map[string]int{} }, "JSON.stringify(f())", "{}", ""},
+		{func() any { return map[string]int{"a": 1} }, "JSON.stringify(f())", `{"a":1}`, ""},
+		{func() map[string]map[string]int { return map[string]map[string]int{"in": {"q": 7}} }, "JSON.stringify(f())", `{"in":{"q":7}}`, ""},
+
+		// A nil map is null, like a nil pointer and a nil interface are.
+		{func() map[string]int { return nil }, "f() === null", true, ""},
+
+		// A nil map value is null too.
+		{func() map[string]any { return map[string]any{"z": nil} }, "f().z === null", true, ""},
+
+		// Integer keys stringify the way they do in JSON.
+		{func() map[int]string { return map[int]string{1: "x", -2: "y"} }, "JSON.stringify(f())", `{"1":"x","-2":"y"}`, ""},
+
+		// Property order is observable in Javascript while Go map iteration order
+		// is randomized, so keys are sorted. With six of them an unsorted result
+		// would match by chance once in 720 runs.
+		{
+			func() map[string]int {
+				return map[string]int{"e": 5, "b": 2, "d": 4, "a": 1, "c": 3, "f": 6}
+			},
+			"Object.keys(f()).join(',')", "a,b,c,d,e,f", "",
+		},
+
+		// Converted one by one: a *big.Int stays a BigInt and keeps its precision.
+		// The same value in a struct field comes back as a lossy double.
+		{func() map[string]any { return map[string]any{"n": big62} }, "typeof f().n + ' ' + String(f().n)", "bigint " + big62.String(), ""},
+
+		// A key Javascript has no name for is a catchable error, not a panic.
+		{func() map[[2]int]int { return map[[2]int]int{{1, 2}: 3} }, "f()", nil, "unsupported map key type"},
+	} {
+		func() {
+			m, err := NewVM()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer m.Close()
+
+			if err := m.RegisterFunc("f", test.f, false); err != nil {
+				t.Errorf("%v: %s: RegisterFunc: %v", i, test.call, err)
+				return
+			}
+
+			v, err := m.Eval(test.call, EvalGlobal)
+			switch {
+			case test.err != "":
+				if err == nil {
+					t.Errorf("%v: %s: expected an error containing %q, got %v", i, test.call, test.err, v)
+					return
+				}
+
+				if !strings.Contains(err.Error(), test.err) {
+					t.Errorf("%v: %s: got error %q, expected it to contain %q", i, test.call, err, test.err)
+				}
+			default:
+				if err != nil {
+					t.Errorf("%v: %s: %v", i, test.call, err)
+					return
+				}
+
+				if g, e := v, test.v; g != e {
+					t.Errorf("%v: %s: got %v, expected %v", i, test.call, g, e)
+				}
+			}
+		}()
+	}
+}
+
+// TestRegisterFuncMapValueResult is TestRegisterFuncMapResult for a Value in a
+// map. It stays a live reference, so a function put in a map is still callable
+// from Javascript. Like jsArray, jsMap takes over the reference it is given, so
+// the Go function has to Dup per call.
+func TestRegisterFuncMapValueResult(t *testing.T) {
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer m.Close()
+
+	fn, err := m.EvalValue("(function() { return 'called'; });", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer fn.Free()
+
+	if err := m.RegisterFunc("f", func() map[string]any {
+		return map[string]any{"cb": fn.Dup()}
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Called more than once to show the per-call Dup keeps 'fn' usable.
+	v, err := m.Eval("typeof f().cb + ' ' + f().cb() + ' ' + f().cb()", EvalGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g, e := v, "function called called"; g != e {
+		t.Fatal(g, e)
+	}
+}

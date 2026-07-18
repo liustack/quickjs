@@ -85,6 +85,8 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1528,6 +1530,8 @@ func (m *VM) jsValue(in reflect.Value) (out lib.TJSValue, err error) {
 		return v, nil
 	case reflect.Interface:
 		return m.jsInterfaceValue(in)
+	case reflect.Map:
+		return m.jsMap(in)
 	case reflect.Slice:
 		var a []reflect.Value
 		for i := 0; i < in.Len(); i++ {
@@ -1566,6 +1570,85 @@ func (m *VM) jsPtrValue(in reflect.Value) (out lib.TJSValue, err error) {
 
 		return m.jsValue(ev)
 	}
+}
+
+// jsMap converts a Go map to a Javascript object. Like jsArray, and unlike the
+// JSON round trip used for structs, it converts every value with jsValue, so a
+// Value stays a live reference and a *big.Int stays a BigInt.
+func (m *VM) jsMap(in reflect.Value) (out lib.TJSValue, err error) {
+	if in.IsNil() {
+		return null, nil
+	}
+
+	// Javascript property names are strings. Integer keys stringify the same way
+	// they do in JSON and the same way obj[1] and obj["1"] are the same property
+	// in Javascript. Collect and validate them before creating the object so a
+	// bad key needs no cleanup.
+	type kv struct {
+		key string
+		val reflect.Value
+	}
+	var a []kv
+	for _, k := range in.MapKeys() {
+		var key string
+		switch k.Kind() {
+		case reflect.String:
+			key = k.String()
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			key = strconv.FormatInt(k.Int(), 10)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			key = strconv.FormatUint(k.Uint(), 10)
+		default:
+			return out, fmt.Errorf("unsupported map key type: %s", k.Type())
+		}
+
+		a = append(a, kv{key, in.MapIndex(k)})
+	}
+
+	// Javascript property order is observable, via Object.keys, JSON.stringify or
+	// for-in, while Go map iteration order is randomized. Sort so the same map
+	// always produces the same object, which is what encoding/json does too.
+	sort.Slice(a, func(i, j int) bool { return a[i].key < a[j].key })
+
+	tls := m.runtime.tls
+	ctx := m.cContext
+	obj := lib.XJS_NewObject(tls, ctx)
+	if isException(obj) {
+		return out, m.errFromException()
+	}
+
+	for _, kv := range a {
+		// Like jsArray, a Value is passed on as is rather than converted, and the
+		// reference it holds is the one handed over below.
+		var jv lib.TJSValue
+		switch x := kv.val.Interface().(type) {
+		case Value:
+			jv = x.v
+		default:
+			if jv, err = m.jsValue(kv.val); err != nil {
+				lib.XFreeValue(tls, ctx, obj)
+				return out, err
+			}
+		}
+
+		p, err2 := libc.CString(kv.key)
+		if err2 != nil {
+			lib.XFreeValue(tls, ctx, jv)
+			lib.XFreeValue(tls, ctx, obj)
+			return out, err2
+		}
+
+		// JS_SetPropertyStr takes over the reference to jv, it does not take over
+		// the property name.
+		rc := lib.XJS_SetPropertyStr(tls, ctx, obj, p, jv)
+		libc.Xfree(tls, p)
+		if rc < 0 {
+			lib.XFreeValue(tls, ctx, obj)
+			return out, m.errFromException()
+		}
+	}
+
+	return obj, nil
 }
 
 func (m *VM) jsArray(a []reflect.Value) (out lib.TJSValue, err error) {
