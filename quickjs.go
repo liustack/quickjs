@@ -1788,6 +1788,18 @@ func (v Value) IsUndefined() bool {
 	return tag(v.v) == lib.EJS_TAG_UNDEFINED
 }
 
+// Call calls the JS function v with this as the receiver and args as
+// arguments, returning the result unpacked to a Go value.
+//
+//	resolve.Call(quickjs.UndefinedValue, "done")
+//	reject.Call(quickjs.UndefinedValue, errors.New("fail"))
+//
+// Note: v must be a JS function. See the [Value] documentation for details
+// about manual memory management.
+func (v Value) Call(this Value, args ...any) (any, error) {
+	return v.vm.call(v.v, this.v, args...)
+}
+
 // Version returns the underlying QuickJS version.
 func Version() string {
 	return lib.MCONFIG_VERSION
