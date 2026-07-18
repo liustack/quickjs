@@ -1366,7 +1366,9 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 			}
 
 			rv := reflect.ValueOf(v)
-			if !rv.Type().AssignableTo(info.in[0]) {
+			if !rv.IsValid() {
+				rv = reflect.Zero(info.in[0])
+			} else if !rv.Type().AssignableTo(info.in[0]) {
 				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), info.in[0]))
 			}
 
@@ -1395,7 +1397,9 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 			}
 
 			rv := reflect.ValueOf(v)
-			if !rv.Type().AssignableTo(typ) {
+			if !rv.IsValid() {
+				rv = reflect.Zero(typ)
+			} else if !rv.Type().AssignableTo(typ) {
 				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), typ))
 			}
 
