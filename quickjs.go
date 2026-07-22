@@ -287,6 +287,36 @@ func (u Undefined) String() string {
 	return "undefined"
 }
 
+// Error holds structured information from a JavaScript exception. The error
+// returned by [VM.Eval], [VM.Call] and the other eval-family methods is an
+// *Error; recover the fields with [errors.As]:
+//
+//	var e *quickjs.Error
+//	if errors.As(err, &e) {
+//		fmt.Println(e.Stack)
+//	}
+//
+// Its Error method reports the same message string the engine has always
+// returned, so existing code comparing the error text keeps working.
+//
+// Only parse/syntax errors carry the FileName, LineNumber and ColumnNumber
+// properties. For runtime errors those fields are zero and the source location
+// is available only from Stack.
+type Error struct {
+	raw string
+
+	Name         string // e.g. "ReferenceError", "TypeError"
+	Message      string // the error message
+	Stack        string // stack trace, one "    at ...\n" frame per line
+	LineNumber   int    // line where the error occurred (parse errors only)
+	ColumnNumber int    // column where the error occurred (parse errors only)
+	FileName     string // file name where the error occurred (parse errors only)
+}
+
+// Error implements the error interface. It returns the same string the engine
+// produces for the exception, unchanged from earlier releases.
+func (e *Error) Error() string { return e.raw }
+
 // Object represents the value of a Javascript object, but not the javascript
 // object instance itself. Do not compare instances of Object.
 type Object struct {
@@ -1022,6 +1052,14 @@ func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
 var (
 	toStringC = [...]byte{'t', 'o', 'S', 't', 'r', 'i', 'n', 'g', 0}
 	toString  = uintptr(unsafe.Pointer(&toStringC[0]))
+
+	// C string property names, read by ErrorFromValue.
+	messageC  = [...]byte{'m', 'e', 's', 's', 'a', 'g', 'e', 0}
+	nameC     = [...]byte{'n', 'a', 'm', 'e', 0}
+	stackC    = [...]byte{'s', 't', 'a', 'c', 'k', 0}
+	lineNumC  = [...]byte{'l', 'i', 'n', 'e', 'N', 'u', 'm', 'b', 'e', 'r', 0}
+	colNumC   = [...]byte{'c', 'o', 'l', 'u', 'm', 'n', 'N', 'u', 'm', 'b', 'e', 'r', 0}
+	fileNameC = [...]byte{'f', 'i', 'l', 'e', 'N', 'a', 'm', 'e', 0}
 )
 
 // value "unpacks" 'v'. FreeValue(v) is called before returning, 'v' must not
@@ -1089,6 +1127,66 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 	return Unsupported{}, nil
 }
 
+// errStrProp reads the string-valued property 'name' from error value 'v',
+// returning "" when the property is absent or not a string. 'v' is borrowed.
+func errStrProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r string) {
+	vr := lib.XJS_GetPropertyStr(tls, ctx, v, name)
+
+	defer lib.XFreeValue(tls, ctx, vr)
+
+	if tag(vr) == lib.EJS_TAG_STRING || tag(vr) == lib.EJS_TAG_STRING_ROPE {
+		p := lib.XToCString(tls, ctx, vr)
+
+		defer lib.XJS_FreeCString(tls, ctx, p)
+
+		return libc.GoString(p)
+	}
+
+	return ""
+}
+
+// errIntProp reads the integer-valued property 'name' from error value 'v',
+// returning 0 when the property is absent or not numeric. 'v' is borrowed.
+func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int) {
+	vr := lib.XJS_GetPropertyStr(tls, ctx, v, name)
+
+	defer lib.XFreeValue(tls, ctx, vr)
+
+	switch tag(vr) {
+	case lib.EJS_TAG_INT:
+		return int(*(*int32)(unsafe.Pointer(&vr)))
+	case lib.EJS_TAG_FLOAT64:
+		return int(jsvToFloat64(vr))
+	}
+
+	return 0
+}
+
+// ErrorFromValue extracts structured error information from JavaScript error
+// value 'v', typically an Error instance caught from a JS exception.
+//
+// 'v' is borrowed: ErrorFromValue does not free it and the caller remains
+// responsible for its lifetime. Like all VM operations it must be called from
+// the VM's own goroutine. See [Error] for which fields are populated.
+func ErrorFromValue(v Value) *Error {
+	tls := v.vm.runtime.tls
+	ctx := v.vm.cContext
+
+	p := lib.XToCString(tls, ctx, v.v)
+	raw := libc.GoString(p)
+	lib.XJS_FreeCString(tls, ctx, p)
+
+	return &Error{
+		raw:          raw,
+		Name:         errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&nameC[0]))),
+		Message:      errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&messageC[0]))),
+		Stack:        errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&stackC[0]))),
+		LineNumber:   errIntProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&lineNumC[0]))),
+		ColumnNumber: errIntProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&colNumC[0]))),
+		FileName:     errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&fileNameC[0]))),
+	}
+}
+
 func (m *VM) errFromException() error {
 	tls := m.runtime.tls
 	ctx := m.cContext
@@ -1096,11 +1194,7 @@ func (m *VM) errFromException() error {
 
 	defer lib.XFreeValue(tls, ctx, e)
 
-	p := lib.XToCString(tls, ctx, e)
-
-	defer lib.XJS_FreeCString(tls, ctx, p)
-
-	return fmt.Errorf("%s", libc.GoString(p))
+	return ErrorFromValue(Value{vm: m, v: e})
 }
 
 // StdAddHelpers adds the 'print' and 'console' global objects to 'm'.
