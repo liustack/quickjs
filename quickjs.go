@@ -1365,22 +1365,11 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 		info.out = append(info.out, typ.Out(i))
 	}
 
-	magic := int32(-1)
+	magic, err := m.allocMagic()
+	if err != nil {
+		return err
+	}
 	goFuncsMu.Lock()
-	for k := range freeMagic {
-		magic = k
-		delete(freeMagic, k)
-		break
-	}
-	if magic < 0 {
-		magic = staticMagic.Add(1)
-		if magic > math.MaxInt16 {
-			staticMagic.Add(-1)
-			goFuncsMu.Unlock()
-			return fmt.Errorf("too many registered functions")
-		}
-
-	}
 	goFuncs[magic] = info
 	goFuncsMu.Unlock()
 	if m.goFuncs == nil {
@@ -1414,6 +1403,22 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 	(*lib.TJSCFunctionListEntry)(unsafe.Pointer(tab)).Fu.Ffunc1.Fcfunc.Fgeneric = fp(callGo)
 	lib.XJS_SetPropertyFunctionList(tls, ctx, g, tab, 1)
 	return nil
+}
+
+// allocMagic allocates a new magic number for a Go function.
+func (m *VM) allocMagic() (int32, error) {
+	goFuncsMu.Lock()
+	defer goFuncsMu.Unlock()
+	for k := range freeMagic {
+		delete(freeMagic, k)
+		return k, nil
+	}
+	magic := staticMagic.Add(1)
+	if magic > math.MaxInt16 {
+		staticMagic.Add(-1)
+		return -1, fmt.Errorf("too many registered functions")
+	}
+	return magic, nil
 }
 
 var rvt = reflect.TypeOf(Value{})
@@ -2031,6 +2036,112 @@ func (v Value) Call(this Value, args ...any) (r any, err error) {
 	// Re-arm the eval-timeout deadline, as the Eval* functions do (see VM.Call).
 	v.vm.configureInterrupt()
 	return v.vm.call(v.v, this.v, args...)
+}
+
+// newCallback creates a JS function object backed by fn and stores fn in the
+// global Go-function table keyed by a fresh magic number. Callers must free
+// the returned TJSValue when it is no longer needed.
+func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, error) {
+	magic, err := m.allocMagic()
+	if err != nil {
+		return lib.TJSValue{}, -1, err
+	}
+
+	wrapped := func(v Value) {
+		fn(v)
+		m.releaseMagic(magic)
+	}
+
+	goFuncsMu.Lock()
+	goFuncs[magic] = &goFunc{
+		f:       reflect.ValueOf(wrapped),
+		maxArgs: 1,
+		minArgs: 1,
+		name:    name,
+		vm:      m,
+		in:      []reflect.Type{rvt},
+	}
+	goFuncsMu.Unlock()
+
+	tls := m.runtime.tls
+	ctx := m.cContext
+
+	cName, err := libc.CString(name)
+	if err != nil {
+		m.releaseMagic(magic)
+		return lib.TJSValue{}, -1, err
+	}
+	defer libc.Xfree(tls, cName)
+
+	jsFn := lib.XJS_NewCFunction2(tls, ctx, fp(callGo), cName, 1, lib.EJS_CFUNC_generic_magic, magic)
+	if isException(jsFn) {
+		lib.XFreeValue(tls, ctx, jsFn)
+		m.releaseMagic(magic)
+		return lib.TJSValue{}, -1, m.errFromException()
+	}
+	return jsFn, magic, nil
+}
+
+// releaseMagic removes the Go function associated with magic from the global
+// tables, returning it to the free pool.
+func (m *VM) releaseMagic(magic int32) {
+	goFuncsMu.Lock()
+	delete(goFuncs, magic)
+	freeMagic[magic] = struct{}{}
+	goFuncsMu.Unlock()
+}
+
+// Then attaches fulfillment and rejection handlers to the Promise v,
+// returning the new promise for chaining. Either onFulfilled or onRejected
+// may be nil.
+func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
+	if v.vm == nil {
+		return Value{}, fmt.Errorf("cannot call Then on a Value not associated with a VM")
+	}
+	m := v.vm
+	tls := m.runtime.tls
+	ctx := m.cContext
+
+	fns := [2]func(Value){onFulfilled, onRejected}
+	names := [2]string{"onFulfilled", "onRejected"}
+	var jsArgs [2]lib.TJSValue
+	var magics [2]int32
+
+	defer func() {
+		for i, jv := range jsArgs {
+			if jv != undefined {
+				lib.XFreeValue(tls, ctx, jv)
+				if err != nil {
+					m.releaseMagic(magics[i])
+				}
+			}
+		}
+	}()
+
+	for i, fn := range fns {
+		if fn == nil {
+			jsArgs[i] = undefined
+			magics[i] = -1
+			continue
+		}
+		jsFn, magic, err := m.newCallback(names[i], fn)
+		if err != nil {
+			return Value{}, err
+		}
+		jsArgs[i] = jsFn
+		magics[i] = magic
+	}
+
+	thenFn := lib.XGetProperty(tls, ctx, v.v, lib.EJS_ATOM_then)
+	result := lib.XJS_Call(tls, ctx, thenFn, v.v, 2, uintptr(unsafe.Pointer(&jsArgs[0])))
+	lib.XFreeValue(tls, ctx, thenFn)
+	if isException(result) {
+		lib.XFreeValue(tls, ctx, result)
+		err = m.errFromException()
+		return
+	}
+
+	return Value{vm: m, v: result}, nil
 }
 
 // CallValue is like [Value.Call] but returns (Value, error) like

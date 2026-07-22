@@ -1,0 +1,77 @@
+// Copyright 2026 The quickjs-go Authors. All rights reserved.
+// Use of the source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package quickjs
+
+import (
+	"unsafe"
+
+	lib "modernc.org/libquickjs"
+)
+
+// PromiseCapability holds a Promise along with its resolve and reject
+// functions, obtained without evaluating JS source.
+type PromiseCapability struct {
+	Promise Value
+	Resolve Value
+	Reject  Value
+}
+
+// Free releases all values held by the capability.
+func (pc *PromiseCapability) Free() {
+	pc.Resolve.Free()
+	pc.Reject.Free()
+	pc.Promise.Free()
+}
+
+// Dup duplicates the capability's promise and returns a new PromiseCapability
+func (pc *PromiseCapability) Dup() (*PromiseCapability, error) {
+	return &PromiseCapability{
+		Promise: pc.Promise.Dup(),
+		Resolve: pc.Resolve.Dup(),
+		Reject:  pc.Reject.Dup(),
+	}, nil
+}
+
+// NewPromiseCapability creates a new JavaScript Promise along with its
+// resolve and reject functions.
+//
+// The returned PromiseCapability must be freed via Free when no longer
+// needed.
+//
+// To expose a promise to JS from a Go function registered with
+// RegisterFunc, return pc.Promise from the Go function.  The
+// resolve/reject values captured by the closure need no Dup because
+// the C API already holds a reference for each:
+//
+//	m.RegisterFunc("delayed", func(delay int) Value {
+//	    pc, err := m.NewPromiseCapability()
+//	    if err != nil { panic(err) }
+//	    youreventloop.Schedule(func() {
+//	        time.Sleep(time.Duration(delay) * time.Millisecond)
+//	        pc.Resolve.Call(UndefinedValue, "done")
+//	        pc.Resolve.Free()
+//	        pc.Reject.Free()
+//	        // pc.Promise.Free() // <- only if returned pc.Promise.Dup()!
+//	    })
+//	    return pc.Promise
+//	}, false)
+func (m *VM) NewPromiseCapability() (*PromiseCapability, error) {
+	tls := m.runtime.tls
+	ctx := m.cContext
+
+	var resolvingFuncs [2]lib.TJSValue
+
+	promise := lib.XJS_NewPromiseCapability(tls, ctx, uintptr(unsafe.Pointer(&resolvingFuncs)))
+	if isException(promise) {
+		lib.XFreeValue(tls, ctx, promise)
+		return nil, m.errFromException()
+	}
+
+	return &PromiseCapability{
+		Promise: Value{vm: m, v: promise},
+		Resolve: Value{vm: m, v: resolvingFuncs[0]},
+		Reject:  Value{vm: m, v: resolvingFuncs[1]},
+	}, nil
+}
