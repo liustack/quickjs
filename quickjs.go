@@ -2042,9 +2042,13 @@ func (v Value) Call(this Value, args ...any) (r any, err error) {
 // global Go-function table keyed by a fresh magic number. Callers must free
 // the returned TJSValue when it is no longer needed.
 func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, error) {
+	// zero is the portable empty JSValue for error returns: on 32-bit
+	// (386/arm) lib.TJSValue is a uint64, so the composite literal
+	// lib.TJSValue{} does not compile there.
+	var zero lib.TJSValue
 	magic, err := m.allocMagic()
 	if err != nil {
-		return lib.TJSValue{}, -1, err
+		return zero, -1, err
 	}
 
 	wrapped := func(v Value) {
@@ -2069,7 +2073,7 @@ func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, erro
 	cName, err := libc.CString(name)
 	if err != nil {
 		m.releaseMagic(magic)
-		return lib.TJSValue{}, -1, err
+		return zero, -1, err
 	}
 	defer libc.Xfree(tls, cName)
 
@@ -2077,7 +2081,7 @@ func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, erro
 	if isException(jsFn) {
 		lib.XFreeValue(tls, ctx, jsFn)
 		m.releaseMagic(magic)
-		return lib.TJSValue{}, -1, m.errFromException()
+		return zero, -1, m.errFromException()
 	}
 	return jsFn, magic, nil
 }
@@ -2105,15 +2109,19 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 	fns := [2]func(Value){onFulfilled, onRejected}
 	names := [2]string{"onFulfilled", "onRejected"}
 	var jsArgs [2]lib.TJSValue
-	var magics [2]int32
+	// magics[i] >= 0 marks a slot for which we created a callback and so own a
+	// reference to jsArgs[i]; -1 means a nil handler or a slot whose callback
+	// was never created (e.g. newCallback failed on the other slot).
+	magics := [2]int32{-1, -1}
 
 	defer func() {
-		for i, jv := range jsArgs {
-			if jv != undefined {
-				lib.XFreeValue(tls, ctx, jv)
-				if err != nil {
-					m.releaseMagic(magics[i])
-				}
+		for i := range jsArgs {
+			if magics[i] < 0 {
+				continue
+			}
+			lib.XFreeValue(tls, ctx, jsArgs[i])
+			if err != nil {
+				m.releaseMagic(magics[i])
 			}
 		}
 	}()
@@ -2132,6 +2140,11 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 		magics[i] = magic
 	}
 
+	// Re-arm the eval-timeout deadline, as the Eval*/Call entry points do:
+	// fetching and invoking .then runs Javascript (a then getter or a
+	// user-overridden then), so without this the deadline from the last Eval
+	// keeps ticking through idle time and could interrupt this call.
+	m.configureInterrupt()
 	thenFn := lib.XGetProperty(tls, ctx, v.v, lib.EJS_ATOM_then)
 	result := lib.XJS_Call(tls, ctx, thenFn, v.v, 2, uintptr(unsafe.Pointer(&jsArgs[0])))
 	lib.XFreeValue(tls, ctx, thenFn)

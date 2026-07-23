@@ -25,13 +25,14 @@ func (pc *PromiseCapability) Free() {
 	pc.Promise.Free()
 }
 
-// Dup duplicates the capability's promise and returns a new PromiseCapability
-func (pc *PromiseCapability) Dup() (*PromiseCapability, error) {
+// Dup duplicates the capability — its promise and both resolving functions —
+// returning a new PromiseCapability that must itself be released via Free.
+func (pc *PromiseCapability) Dup() *PromiseCapability {
 	return &PromiseCapability{
 		Promise: pc.Promise.Dup(),
 		Resolve: pc.Resolve.Dup(),
 		Reject:  pc.Reject.Dup(),
-	}, nil
+	}
 }
 
 // NewPromiseCapability creates a new JavaScript Promise along with its
