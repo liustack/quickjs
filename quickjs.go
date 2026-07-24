@@ -112,6 +112,14 @@ var (
 	// UndefinedValue is a Value representing Javascript value 'undefined'. It is
 	// not associated with any particular VM.
 	UndefinedValue = Value{v: undefined}
+
+	// callbackClassID is a global JS class ID for callback objects whose
+	// lifetime is tied to a JS object's refcount. Each VM registers this
+	// class ID once with its runtime. The class carries both an Fcall
+	// handler (so the object is callable from JS) and an Ffinalizer (so the
+	// goFuncs entry is released when the last JS reference drops).
+	callbackClassID     lib.TJSClassID
+	initCallbackClassID sync.Once
 )
 
 // runtime represents a Javascript runtime.
@@ -1365,13 +1373,10 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 		info.out = append(info.out, typ.Out(i))
 	}
 
-	magic, err := m.allocMagic()
+	magic, err := registerCallback(info)
 	if err != nil {
 		return err
 	}
-	goFuncsMu.Lock()
-	goFuncs[magic] = info
-	goFuncsMu.Unlock()
 	if m.goFuncs == nil {
 		m.goFuncs = map[string]int32{}
 	}
@@ -1405,12 +1410,14 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 	return nil
 }
 
-// allocMagic allocates a new magic number for a Go function.
-func (m *VM) allocMagic() (int32, error) {
+// registerCallback allocates a magic number for the given goFunc and stores
+// it in the global goFuncs map. It returns the allocated magic number or an error
+func registerCallback(info *goFunc) (int32, error) {
 	goFuncsMu.Lock()
 	defer goFuncsMu.Unlock()
 	for k := range freeMagic {
 		delete(freeMagic, k)
+		goFuncs[k] = info
 		return k, nil
 	}
 	magic := staticMagic.Add(1)
@@ -1418,6 +1425,7 @@ func (m *VM) allocMagic() (int32, error) {
 		staticMagic.Add(-1)
 		return -1, fmt.Errorf("too many registered functions")
 	}
+	goFuncs[magic] = info
 	return magic, nil
 }
 
@@ -2039,56 +2047,85 @@ func (v Value) Call(this Value, args ...any) (r any, err error) {
 }
 
 // newCallback creates a JS function object backed by fn and stores fn in the
-// global Go-function table keyed by a fresh magic number. Callers must free
-// the returned TJSValue when it is no longer needed.
+// global Go-function table keyed by a fresh magic number. The returned
+// TJSValue is a custom-class object whose finalizer calls releaseMagic when
+// the last JS reference is dropped, so the goFuncs entry is freed even when
+// the callback never fires (e.g. the sibling handler in a .then(f, g)).
+//
+// Callers must free the returned TJSValue when it is no longer needed.
 func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, error) {
-	// zero is the portable empty JSValue for error returns: on 32-bit
-	// (386/arm) lib.TJSValue is a uint64, so the composite literal
-	// lib.TJSValue{} does not compile there.
 	var zero lib.TJSValue
-	magic, err := m.allocMagic()
-	if err != nil {
+	if err := m.ensureCallbackClass(); err != nil {
 		return zero, -1, err
 	}
 
-	wrapped := func(v Value) {
-		fn(v)
-		m.releaseMagic(magic)
-	}
-
-	goFuncsMu.Lock()
-	goFuncs[magic] = &goFunc{
-		f:       reflect.ValueOf(wrapped),
+	magic, err := registerCallback(&goFunc{
+		f:       reflect.ValueOf(fn),
 		maxArgs: 1,
 		minArgs: 1,
 		name:    name,
 		vm:      m,
 		in:      []reflect.Type{rvt},
+	})
+	if err != nil {
+		return zero, -1, err
 	}
-	goFuncsMu.Unlock()
 
 	tls := m.runtime.tls
 	ctx := m.cContext
 
-	cName, err := libc.CString(name)
-	if err != nil {
-		m.releaseMagic(magic)
-		return zero, -1, err
-	}
-	defer libc.Xfree(tls, cName)
-
-	jsFn := lib.XJS_NewCFunction2(tls, ctx, fp(callGo), cName, 1, lib.EJS_CFUNC_generic_magic, magic)
-	if isException(jsFn) {
-		lib.XFreeValue(tls, ctx, jsFn)
-		m.releaseMagic(magic)
+	obj := lib.XJS_NewObjectClass(tls, ctx, int32(callbackClassID))
+	if isException(obj) {
+		lib.XFreeValue(tls, ctx, obj)
+		releaseMagic(magic)
 		return zero, -1, m.errFromException()
 	}
-	return jsFn, magic, nil
+	lib.XJS_SetOpaque(tls, obj, uintptr(magic))
+	return obj, magic, nil
+}
+
+// ensureCallbackClass registers the custom callback class on m's runtime if
+// not already done. The class is callable from JS (via Fcall) and has a
+// finalizer (via Ffinalizer) that releases the magic when the JS object's
+// refcount reaches zero — this is what makes Then leak-free.
+func (m *VM) ensureCallbackClass() error {
+	initCallbackClassID.Do(func() {
+		lib.XJS_NewClassID(m.runtime.tls, uintptr(unsafe.Pointer(&callbackClassID)))
+	})
+	tls := m.runtime.tls
+	cName, err := libc.CString("GoCallback")
+	if err != nil {
+		return err
+	}
+	def := lib.TJSClassDef{
+		Fclass_name: cName,
+		Ffinalizer:  fp(callbackFinalizer),
+		Fcall:       fp(callbackCall),
+	}
+	lib.XJS_NewClass(tls, m.runtime.cRuntime, callbackClassID, uintptr(unsafe.Pointer(&def)))
+	libc.Xfree(tls, cName)
+	return nil
+}
+
+// callbackCall is the JSClassCall handler for callback-class objects. It reads
+// the magic from the object's opaque storage and dispatches through the
+// existing callGo path.
+func callbackCall(tls *libc.TLS, ctx uintptr, funcObj lib.TJSValue, this lib.TJSValue, argc int32, argv uintptr, flags int32) lib.TJSValue {
+	magic := int32(lib.XJS_GetOpaque(tls, funcObj, callbackClassID))
+	return callGo(tls, ctx, this, argc, argv, magic)
+}
+
+// callbackFinalizer is the JSClassFinalizer for callback-class objects. It
+// reads the magic from the object's opaque storage and releases the global
+// goFuncs entry so that the magic can be reused.
+func callbackFinalizer(tls *libc.TLS, rt uintptr, val lib.TJSValue) {
+	magic := int32(lib.XJS_GetOpaque(tls, val, callbackClassID))
+	releaseMagic(magic)
 }
 
 // releaseMagic removes the Go function associated with magic from the global
 // tables, returning it to the free pool.
-func (m *VM) releaseMagic(magic int32) {
+func releaseMagic(magic int32) {
 	goFuncsMu.Lock()
 	delete(goFuncs, magic)
 	freeMagic[magic] = struct{}{}
@@ -2120,9 +2157,6 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 				continue
 			}
 			lib.XFreeValue(tls, ctx, jsArgs[i])
-			if err != nil {
-				m.releaseMagic(magics[i])
-			}
 		}
 	}()
 

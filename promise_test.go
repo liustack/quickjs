@@ -35,6 +35,7 @@ func TestNewPromiseCapability(t *testing.T) {
 	g := m.GlobalObject()
 	pa, _ := m.NewAtom("p")
 	m.SetPropertyValue(g, pa, pc.Promise)
+	g.Free()
 
 	m.Eval(`
 		globalThis.promiseResult = 'pending';
@@ -57,6 +58,7 @@ func TestNewPromiseCapability_Reject(t *testing.T) {
 	g := m.GlobalObject()
 	pa, _ := m.NewAtom("p")
 	m.SetPropertyValue(g, pa, pc.Promise)
+	g.Free()
 
 	m.Eval(`
 		globalThis.promiseResult = 'pending';
@@ -229,7 +231,9 @@ func TestThen(t *testing.T) {
 		defer res.Free()
 
 		pc.Resolve.Call(UndefinedValue, "good")
-		m.ExecutePendingJobs()
+		if _, err := m.ExecutePendingJobs(); err != nil {
+			t.Fatal(err)
+		}
 
 		if fulfillStr != "good" || rejectStr != "" {
 			t.Fatalf("fulfill=%q reject=%q, want fulfill=%q reject=\"\"", fulfillStr, rejectStr, "good")
@@ -271,4 +275,39 @@ func TestThen(t *testing.T) {
 		pc.Resolve.Call(UndefinedValue, "any")
 		m.ExecutePendingJobs()
 	})
+}
+
+func TestThenLeak(t *testing.T) {
+	m := newTestVM(t)
+
+	// Each Then call allocates 2 magics (one per handler). The old
+	// release-on-fire approach leaked the unfired sibling handler's magic,
+	// so 2*N magics would pile up and exhaust the pool (MaxInt16=32767).
+	// With the finalizer approach, both magics are freed when the promise
+	// settles, so we can run many more iterations than the pool allows.
+	//
+	// math.MaxInt16 = 32767. Each iteration creates 2 handlers. Without
+	// the fix, iteration 16384 exhausts the pool. Run 40000 iterations to
+	// definitively prove the fix works.
+	const n = 40000
+	for i := range n {
+		pc, err := m.NewPromiseCapability()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := pc.Promise.Then(func(Value) {}, func(Value) {})
+		if err != nil {
+			t.Fatalf("Then failed at iteration %d: %v", i, err)
+		}
+		res.Free()
+
+		if _, err := pc.Resolve.Call(UndefinedValue, "ok"); err != nil {
+			t.Fatalf("Resolve failed at iteration %d: %v", i, err)
+		}
+		if _, err := m.ExecutePendingJobs(); err != nil {
+			t.Fatalf("ExecutePendingJobs failed at iteration %d: %v", i, err)
+		}
+		pc.Free()
+	}
 }
