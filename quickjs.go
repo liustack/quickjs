@@ -126,8 +126,9 @@ var (
 //
 // Note: runtime is not safe for concurrent use by multiple goroutines.
 type runtime struct {
-	cRuntime uintptr // lib.TJSRuntime
-	tls      *libc.TLS
+	cRuntime          uintptr // lib.TJSRuntime
+	tls               *libc.TLS
+	callbackClassInit bool
 }
 
 // newRuntime returns a newly create Runtime
@@ -2097,9 +2098,20 @@ func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, erro
 // finalizer (via Ffinalizer) that releases the magic when the JS object's
 // refcount reaches zero — this is what makes Then leak-free.
 func (m *VM) ensureCallbackClass() error {
+	if m.runtime.callbackClassInit {
+		return nil
+	}
+
+	var initErr error
 	initCallbackClassID.Do(func() {
-		lib.XJS_NewClassID(m.runtime.tls, uintptr(unsafe.Pointer(&callbackClassID)))
+		if lib.XJS_NewClassID(m.runtime.tls, uintptr(unsafe.Pointer(&callbackClassID))) == 0 {
+			initErr = fmt.Errorf("failed to allocate callback class ID")
+		}
 	})
+	if initErr != nil {
+		return initErr
+	}
+
 	tls := m.runtime.tls
 	cName, err := libc.CString("GoCallback")
 	if err != nil {
@@ -2121,7 +2133,12 @@ func (m *VM) ensureCallbackClass() error {
 		Ffinalizer:  fp(callbackFinalizer),
 		Fcall:       fp(callbackCall),
 	}
-	lib.XJS_NewClass(tls, m.runtime.cRuntime, callbackClassID, defPtr)
+
+	if lib.XJS_NewClass(tls, m.runtime.cRuntime, callbackClassID, defPtr) < 0 {
+		return fmt.Errorf("failed to register callback class")
+	}
+
+	m.runtime.callbackClassInit = true
 	return nil
 }
 
