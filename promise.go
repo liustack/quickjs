@@ -65,7 +65,7 @@ func (m *VM) NewPromiseCapability() (*PromiseCapability, error) {
 	ctx := m.cContext
 
 	// Allocate on the C heap so the pointer stays valid if Go's stack grows.
-	resolvingFuncsSize := 2 * int(unsafe.Sizeof(lib.TJSValue{}))
+	resolvingFuncsSize := 2 * int(sizeofJsValue)
 	resolvingFuncsPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(resolvingFuncsSize))
 	if resolvingFuncsPtr == 0 {
 		return nil, fmt.Errorf("OOM")

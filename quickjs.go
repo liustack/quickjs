@@ -2157,7 +2157,7 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 	names := [2]string{"onFulfilled", "onRejected"}
 
 	// Allocate on the C heap so the pointer stays valid if Go's stack grows.
-	jsArgsSize := 2 * int(unsafe.Sizeof(lib.TJSValue{}))
+	jsArgsSize := 2 * int(sizeofJsValue)
 	jsArgsPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(jsArgsSize))
 	if jsArgsPtr == 0 {
 		return Value{}, fmt.Errorf("OOM")
