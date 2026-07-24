@@ -5,8 +5,10 @@
 package quickjs
 
 import (
+	"fmt"
 	"unsafe"
 
+	"modernc.org/libc"
 	lib "modernc.org/libquickjs"
 )
 
@@ -62,13 +64,21 @@ func (m *VM) NewPromiseCapability() (*PromiseCapability, error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
 
-	var resolvingFuncs [2]lib.TJSValue
+	// Allocate on the C heap so the pointer stays valid if Go's stack grows.
+	resolvingFuncsSize := 2 * int(unsafe.Sizeof(lib.TJSValue{}))
+	resolvingFuncsPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(resolvingFuncsSize))
+	if resolvingFuncsPtr == 0 {
+		return nil, fmt.Errorf("OOM")
+	}
+	defer libc.Xfree(tls, resolvingFuncsPtr)
 
-	promise := lib.XJS_NewPromiseCapability(tls, ctx, uintptr(unsafe.Pointer(&resolvingFuncs)))
+	promise := lib.XJS_NewPromiseCapability(tls, ctx, resolvingFuncsPtr)
 	if isException(promise) {
 		lib.XFreeValue(tls, ctx, promise)
 		return nil, m.errFromException()
 	}
+
+	resolvingFuncs := unsafe.Slice((*lib.TJSValue)(unsafe.Pointer(resolvingFuncsPtr)), 2)
 
 	return &PromiseCapability{
 		Promise: Value{vm: m, v: promise},

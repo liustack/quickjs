@@ -2097,13 +2097,23 @@ func (m *VM) ensureCallbackClass() error {
 	if err != nil {
 		return err
 	}
-	def := lib.TJSClassDef{
+	defer libc.Xfree(tls, cName)
+
+	// Allocate the class def on the C heap so the uintptr passed to
+	// XJS_NewClass stays valid even if Go's stack grows.
+	defSize := int(unsafe.Sizeof(lib.TJSClassDef{}))
+	defPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(defSize))
+	if defPtr == 0 {
+		return fmt.Errorf("OOM")
+	}
+	defer libc.Xfree(tls, defPtr)
+
+	*(*lib.TJSClassDef)(unsafe.Pointer(defPtr)) = lib.TJSClassDef{
 		Fclass_name: cName,
 		Ffinalizer:  fp(callbackFinalizer),
 		Fcall:       fp(callbackCall),
 	}
-	lib.XJS_NewClass(tls, m.runtime.cRuntime, callbackClassID, uintptr(unsafe.Pointer(&def)))
-	libc.Xfree(tls, cName)
+	lib.XJS_NewClass(tls, m.runtime.cRuntime, callbackClassID, defPtr)
 	return nil
 }
 
