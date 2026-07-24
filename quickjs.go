@@ -104,7 +104,7 @@ var (
 
 	goFuncsMu sync.Mutex
 	goFuncs   = map[int32]*goFunc{}
-	freeMagic = map[int32]struct{}{}
+	freeMagic []int32
 
 	customLoadersMu sync.Mutex
 	customLoaders   = map[uintptr]moduleLoaderState{}
@@ -461,23 +461,21 @@ func (m *VM) SetCanBlock(value bool) {
 func (m *VM) Close() error {
 	tls := m.runtime.tls
 	ctx := m.cContext
-	var a []int32
-	var b []*goFunc
-	for _, k := range m.goFuncs {
-		a = append(a, k)
-	}
+
 	goFuncsMu.Lock()
-	for _, k := range a {
-		b = append(b, goFuncs[k])
-		freeMagic[k] = struct{}{}
-		delete(goFuncs, k)
+	for _, magic := range m.goFuncs {
+		if gf := goFuncs[magic]; gf != nil {
+			delete(goFuncs, magic)
+			freeMagic = append(freeMagic, magic)
+			if gf.cName != 0 {
+				libc.Xfree(tls, gf.cName)
+			}
+			if gf.tab != 0 {
+				libc.Xfree(tls, gf.tab)
+			}
+		}
 	}
 	goFuncsMu.Unlock()
-
-	for _, v := range b {
-		libc.Xfree(tls, v.cName)
-		libc.Xfree(tls, v.tab)
-	}
 
 	libc.Xfree(tls, m.interruptData)
 	libc.Xfree(tls, m.toStringArgv)
@@ -1411,12 +1409,13 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 }
 
 // registerCallback allocates a magic number for the given goFunc and stores
-// it in the global goFuncs map. It returns the allocated magic number or an error
+// it in the global goFuncs map. It returns the allocated magic number or an error.
 func registerCallback(info *goFunc) (int32, error) {
 	goFuncsMu.Lock()
 	defer goFuncsMu.Unlock()
-	for k := range freeMagic {
-		delete(freeMagic, k)
+	if n := len(freeMagic); n > 0 {
+		k := freeMagic[n-1]
+		freeMagic = freeMagic[:n-1]
 		goFuncs[k] = info
 		return k, nil
 	}
@@ -1427,6 +1426,15 @@ func registerCallback(info *goFunc) (int32, error) {
 	}
 	goFuncs[magic] = info
 	return magic, nil
+}
+
+// releaseMagic removes the Go function associated with magic from the global
+// tables, returning it to the free pool.
+func releaseMagic(magic int32) {
+	goFuncsMu.Lock()
+	delete(goFuncs, magic)
+	freeMagic = append(freeMagic, magic)
+	goFuncsMu.Unlock()
 }
 
 var rvt = reflect.TypeOf(Value{})
@@ -2131,15 +2139,6 @@ func callbackCall(tls *libc.TLS, ctx uintptr, funcObj lib.TJSValue, this lib.TJS
 func callbackFinalizer(tls *libc.TLS, rt uintptr, val lib.TJSValue) {
 	magic := int32(lib.XJS_GetOpaque(tls, val, callbackClassID))
 	releaseMagic(magic)
-}
-
-// releaseMagic removes the Go function associated with magic from the global
-// tables, returning it to the free pool.
-func releaseMagic(magic int32) {
-	goFuncsMu.Lock()
-	delete(goFuncs, magic)
-	freeMagic[magic] = struct{}{}
-	goFuncsMu.Unlock()
 }
 
 // Then attaches fulfillment and rejection handlers to the Promise v,
