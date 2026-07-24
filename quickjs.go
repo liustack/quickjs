@@ -2155,7 +2155,16 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 
 	fns := [2]func(Value){onFulfilled, onRejected}
 	names := [2]string{"onFulfilled", "onRejected"}
-	var jsArgs [2]lib.TJSValue
+
+	// Allocate on the C heap so the pointer stays valid if Go's stack grows.
+	jsArgsSize := 2 * int(unsafe.Sizeof(lib.TJSValue{}))
+	jsArgsPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(jsArgsSize))
+	if jsArgsPtr == 0 {
+		return Value{}, fmt.Errorf("OOM")
+	}
+	defer libc.Xfree(tls, jsArgsPtr)
+	jsArgs := unsafe.Slice((*lib.TJSValue)(unsafe.Pointer(jsArgsPtr)), 2)
+
 	// magics[i] >= 0 marks a slot for which we created a callback and so own a
 	// reference to jsArgs[i]; -1 means a nil handler or a slot whose callback
 	// was never created (e.g. newCallback failed on the other slot).
@@ -2190,7 +2199,7 @@ func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
 	// keeps ticking through idle time and could interrupt this call.
 	m.configureInterrupt()
 	thenFn := lib.XGetProperty(tls, ctx, v.v, lib.EJS_ATOM_then)
-	result := lib.XJS_Call(tls, ctx, thenFn, v.v, 2, uintptr(unsafe.Pointer(&jsArgs[0])))
+	result := lib.XJS_Call(tls, ctx, thenFn, v.v, 2, jsArgsPtr)
 	lib.XFreeValue(tls, ctx, thenFn)
 	if isException(result) {
 		lib.XFreeValue(tls, ctx, result)
