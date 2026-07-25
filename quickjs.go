@@ -104,7 +104,7 @@ var (
 
 	goFuncsMu sync.Mutex
 	goFuncs   = map[int32]*goFunc{}
-	freeMagic = map[int32]struct{}{}
+	freeMagic []int32
 
 	customLoadersMu sync.Mutex
 	customLoaders   = map[uintptr]moduleLoaderState{}
@@ -112,14 +112,23 @@ var (
 	// UndefinedValue is a Value representing Javascript value 'undefined'. It is
 	// not associated with any particular VM.
 	UndefinedValue = Value{v: undefined}
+
+	// callbackClassID is a global JS class ID for callback objects whose
+	// lifetime is tied to a JS object's refcount. Each VM registers this
+	// class ID once with its runtime. The class carries both an Fcall
+	// handler (so the object is callable from JS) and an Ffinalizer (so the
+	// goFuncs entry is released when the last JS reference drops).
+	callbackClassID     lib.TJSClassID
+	initCallbackClassID sync.Once
 )
 
 // runtime represents a Javascript runtime.
 //
 // Note: runtime is not safe for concurrent use by multiple goroutines.
 type runtime struct {
-	cRuntime uintptr // lib.TJSRuntime
-	tls      *libc.TLS
+	cRuntime          uintptr // lib.TJSRuntime
+	tls               *libc.TLS
+	callbackClassInit bool
 }
 
 // newRuntime returns a newly create Runtime
@@ -453,22 +462,24 @@ func (m *VM) SetCanBlock(value bool) {
 func (m *VM) Close() error {
 	tls := m.runtime.tls
 	ctx := m.cContext
-	var a []int32
-	var b []*goFunc
-	for _, k := range m.goFuncs {
-		a = append(a, k)
-	}
+
+	var freed []*goFunc
 	goFuncsMu.Lock()
-	for _, k := range a {
-		b = append(b, goFuncs[k])
-		freeMagic[k] = struct{}{}
-		delete(goFuncs, k)
+	for _, magic := range m.goFuncs {
+		if gf := goFuncs[magic]; gf != nil {
+			delete(goFuncs, magic)
+			freeMagic = append(freeMagic, magic)
+			freed = append(freed, gf)
+		}
 	}
 	goFuncsMu.Unlock()
 
-	for _, v := range b {
-		libc.Xfree(tls, v.cName)
-		libc.Xfree(tls, v.tab)
+	// Free outside the lock: goFuncsMu is process-global and taken by callGo on
+	// every JS->Go call, and callbackFinalizer re-enters it, so keep libc calls
+	// and anything that can run JS out of its critical section.
+	for _, gf := range freed {
+		libc.Xfree(tls, gf.cName)
+		libc.Xfree(tls, gf.tab)
 	}
 
 	libc.Xfree(tls, m.interruptData)
@@ -1365,24 +1376,10 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 		info.out = append(info.out, typ.Out(i))
 	}
 
-	magic := int32(-1)
-	goFuncsMu.Lock()
-	for k := range freeMagic {
-		magic = k
-		delete(freeMagic, k)
-		break
+	magic, err := registerCallback(info)
+	if err != nil {
+		return err
 	}
-	if magic < 0 {
-		magic = staticMagic.Add(1)
-		if magic > math.MaxInt16 {
-			staticMagic.Add(-1)
-			goFuncsMu.Unlock()
-			return fmt.Errorf("too many registered functions")
-		}
-
-	}
-	goFuncs[magic] = info
-	goFuncsMu.Unlock()
 	if m.goFuncs == nil {
 		m.goFuncs = map[string]int32{}
 	}
@@ -1414,6 +1411,40 @@ func (m *VM) registerFunc(name string, f any, wantThis, host bool) (err error) {
 	(*lib.TJSCFunctionListEntry)(unsafe.Pointer(tab)).Fu.Ffunc1.Fcfunc.Fgeneric = fp(callGo)
 	lib.XJS_SetPropertyFunctionList(tls, ctx, g, tab, 1)
 	return nil
+}
+
+// registerCallback allocates a magic number for the given goFunc and stores
+// it in the global goFuncs map. It returns the allocated magic number or an error.
+func registerCallback(info *goFunc) (int32, error) {
+	goFuncsMu.Lock()
+	defer goFuncsMu.Unlock()
+	if n := len(freeMagic); n > 0 {
+		k := freeMagic[n-1]
+		freeMagic = freeMagic[:n-1]
+		goFuncs[k] = info
+		return k, nil
+	}
+	magic := staticMagic.Add(1)
+	if magic > math.MaxInt16 {
+		staticMagic.Add(-1)
+		return -1, fmt.Errorf("too many registered functions")
+	}
+	goFuncs[magic] = info
+	return magic, nil
+}
+
+// releaseMagic removes the Go function associated with magic from the global
+// tables, returning it to the free pool.
+func releaseMagic(magic int32) {
+	goFuncsMu.Lock()
+	// Append only if the magic was actually registered. freeMagic is a slice,
+	// so unlike the old map it does not dedup: a double release would queue the
+	// same magic twice and later hand it to two live callbacks at once.
+	if _, ok := goFuncs[magic]; ok {
+		delete(goFuncs, magic)
+		freeMagic = append(freeMagic, magic)
+	}
+	goFuncsMu.Unlock()
 }
 
 var rvt = reflect.TypeOf(Value{})
@@ -2031,6 +2062,177 @@ func (v Value) Call(this Value, args ...any) (r any, err error) {
 	// Re-arm the eval-timeout deadline, as the Eval* functions do (see VM.Call).
 	v.vm.configureInterrupt()
 	return v.vm.call(v.v, this.v, args...)
+}
+
+// newCallback creates a JS function object backed by fn and stores fn in the
+// global Go-function table keyed by a fresh magic number. The returned
+// TJSValue is a custom-class object whose finalizer calls releaseMagic when
+// the last JS reference is dropped, so the goFuncs entry is freed even when
+// the callback never fires (e.g. the sibling handler in a .then(f, g)).
+//
+// Callers must free the returned TJSValue when it is no longer needed.
+func (m *VM) newCallback(name string, fn func(Value)) (lib.TJSValue, int32, error) {
+	var zero lib.TJSValue
+	if err := m.ensureCallbackClass(); err != nil {
+		return zero, -1, err
+	}
+
+	magic, err := registerCallback(&goFunc{
+		f:       reflect.ValueOf(fn),
+		maxArgs: 1,
+		minArgs: 1,
+		name:    name,
+		vm:      m,
+		in:      []reflect.Type{rvt},
+	})
+	if err != nil {
+		return zero, -1, err
+	}
+
+	tls := m.runtime.tls
+	ctx := m.cContext
+
+	obj := lib.XJS_NewObjectClass(tls, ctx, int32(callbackClassID))
+	if isException(obj) {
+		lib.XFreeValue(tls, ctx, obj)
+		releaseMagic(magic)
+		return zero, -1, m.errFromException()
+	}
+	lib.XJS_SetOpaque(tls, obj, uintptr(magic))
+	return obj, magic, nil
+}
+
+// ensureCallbackClass registers the custom callback class on m's runtime if
+// not already done. The class is callable from JS (via Fcall) and has a
+// finalizer (via Ffinalizer) that releases the magic when the JS object's
+// refcount reaches zero — this is what makes Then leak-free.
+func (m *VM) ensureCallbackClass() error {
+	if m.runtime.callbackClassInit {
+		return nil
+	}
+
+	var initErr error
+	initCallbackClassID.Do(func() {
+		if lib.XJS_NewClassID(m.runtime.tls, uintptr(unsafe.Pointer(&callbackClassID))) == 0 {
+			initErr = fmt.Errorf("failed to allocate callback class ID")
+		}
+	})
+	if initErr != nil {
+		return initErr
+	}
+
+	tls := m.runtime.tls
+	cName, err := libc.CString("GoCallback")
+	if err != nil {
+		return err
+	}
+	defer libc.Xfree(tls, cName)
+
+	// Allocate the class def on the C heap so the uintptr passed to
+	// XJS_NewClass stays valid even if Go's stack grows.
+	defSize := int(unsafe.Sizeof(lib.TJSClassDef{}))
+	defPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(defSize))
+	if defPtr == 0 {
+		return fmt.Errorf("OOM")
+	}
+	defer libc.Xfree(tls, defPtr)
+
+	*(*lib.TJSClassDef)(unsafe.Pointer(defPtr)) = lib.TJSClassDef{
+		Fclass_name: cName,
+		Ffinalizer:  fp(callbackFinalizer),
+		Fcall:       fp(callbackCall),
+	}
+
+	if lib.XJS_NewClass(tls, m.runtime.cRuntime, callbackClassID, defPtr) < 0 {
+		return fmt.Errorf("failed to register callback class")
+	}
+
+	m.runtime.callbackClassInit = true
+	return nil
+}
+
+// callbackCall is the JSClassCall handler for callback-class objects. It reads
+// the magic from the object's opaque storage and dispatches through the
+// existing callGo path.
+func callbackCall(tls *libc.TLS, ctx uintptr, funcObj lib.TJSValue, this lib.TJSValue, argc int32, argv uintptr, flags int32) lib.TJSValue {
+	magic := int32(lib.XJS_GetOpaque(tls, funcObj, callbackClassID))
+	return callGo(tls, ctx, this, argc, argv, magic)
+}
+
+// callbackFinalizer is the JSClassFinalizer for callback-class objects. It
+// reads the magic from the object's opaque storage and releases the global
+// goFuncs entry so that the magic can be reused.
+func callbackFinalizer(tls *libc.TLS, rt uintptr, val lib.TJSValue) {
+	magic := int32(lib.XJS_GetOpaque(tls, val, callbackClassID))
+	releaseMagic(magic)
+}
+
+// Then attaches fulfillment and rejection handlers to the Promise v,
+// returning the new promise for chaining. Either onFulfilled or onRejected
+// may be nil.
+func (v Value) Then(onFulfilled, onRejected func(Value)) (_ Value, err error) {
+	if v.vm == nil {
+		return Value{}, fmt.Errorf("cannot call Then on a Value not associated with a VM")
+	}
+	m := v.vm
+	tls := m.runtime.tls
+	ctx := m.cContext
+
+	fns := [2]func(Value){onFulfilled, onRejected}
+	names := [2]string{"onFulfilled", "onRejected"}
+
+	// Allocate on the C heap so the pointer stays valid if Go's stack grows.
+	jsArgsSize := 2 * int(sizeofJsValue)
+	jsArgsPtr := libc.Xcalloc(tls, 1, libc.Tsize_t(jsArgsSize))
+	if jsArgsPtr == 0 {
+		return Value{}, fmt.Errorf("OOM")
+	}
+	defer libc.Xfree(tls, jsArgsPtr)
+	jsArgs := unsafe.Slice((*lib.TJSValue)(unsafe.Pointer(jsArgsPtr)), 2)
+
+	// magics[i] >= 0 marks a slot for which we created a callback and so own a
+	// reference to jsArgs[i]; -1 means a nil handler or a slot whose callback
+	// was never created (e.g. newCallback failed on the other slot).
+	magics := [2]int32{-1, -1}
+
+	defer func() {
+		for i := range jsArgs {
+			if magics[i] < 0 {
+				continue
+			}
+			lib.XFreeValue(tls, ctx, jsArgs[i])
+		}
+	}()
+
+	for i, fn := range fns {
+		if fn == nil {
+			jsArgs[i] = undefined
+			magics[i] = -1
+			continue
+		}
+		jsFn, magic, err := m.newCallback(names[i], fn)
+		if err != nil {
+			return Value{}, err
+		}
+		jsArgs[i] = jsFn
+		magics[i] = magic
+	}
+
+	// Re-arm the eval-timeout deadline, as the Eval*/Call entry points do:
+	// fetching and invoking .then runs Javascript (a then getter or a
+	// user-overridden then), so without this the deadline from the last Eval
+	// keeps ticking through idle time and could interrupt this call.
+	m.configureInterrupt()
+	thenFn := lib.XGetProperty(tls, ctx, v.v, lib.EJS_ATOM_then)
+	result := lib.XJS_Call(tls, ctx, thenFn, v.v, 2, jsArgsPtr)
+	lib.XFreeValue(tls, ctx, thenFn)
+	if isException(result) {
+		lib.XFreeValue(tls, ctx, result)
+		err = m.errFromException()
+		return
+	}
+
+	return Value{vm: m, v: result}, nil
 }
 
 // CallValue is like [Value.Call] but returns (Value, error) like
