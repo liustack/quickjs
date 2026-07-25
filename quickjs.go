@@ -463,20 +463,24 @@ func (m *VM) Close() error {
 	tls := m.runtime.tls
 	ctx := m.cContext
 
+	var freed []*goFunc
 	goFuncsMu.Lock()
 	for _, magic := range m.goFuncs {
 		if gf := goFuncs[magic]; gf != nil {
 			delete(goFuncs, magic)
 			freeMagic = append(freeMagic, magic)
-			if gf.cName != 0 {
-				libc.Xfree(tls, gf.cName)
-			}
-			if gf.tab != 0 {
-				libc.Xfree(tls, gf.tab)
-			}
+			freed = append(freed, gf)
 		}
 	}
 	goFuncsMu.Unlock()
+
+	// Free outside the lock: goFuncsMu is process-global and taken by callGo on
+	// every JS->Go call, and callbackFinalizer re-enters it, so keep libc calls
+	// and anything that can run JS out of its critical section.
+	for _, gf := range freed {
+		libc.Xfree(tls, gf.cName)
+		libc.Xfree(tls, gf.tab)
+	}
 
 	libc.Xfree(tls, m.interruptData)
 	libc.Xfree(tls, m.toStringArgv)
@@ -1433,8 +1437,13 @@ func registerCallback(info *goFunc) (int32, error) {
 // tables, returning it to the free pool.
 func releaseMagic(magic int32) {
 	goFuncsMu.Lock()
-	delete(goFuncs, magic)
-	freeMagic = append(freeMagic, magic)
+	// Append only if the magic was actually registered. freeMagic is a slice,
+	// so unlike the old map it does not dedup: a double release would queue the
+	// same magic twice and later hand it to two live callbacks at once.
+	if _, ok := goFuncs[magic]; ok {
+		delete(goFuncs, magic)
+		freeMagic = append(freeMagic, magic)
+	}
 	goFuncsMu.Unlock()
 }
 
