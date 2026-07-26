@@ -1216,7 +1216,15 @@ func (m *VM) StdAddHelpers() error {
 	return nil
 }
 
-func throwTypeError(tls *libc.TLS, ctx uintptr, msg string, args ...any) (r lib.TJSValue) {
+var (
+	// The C format string used for all messages produced on the Go side. The
+	// message must never be passed as the format itself, it is not a literal
+	// and any '%' in it would be taken for a conversion specification.
+	percentSC = [...]byte{'%', 's', 0}
+	percentS  = uintptr(unsafe.Pointer(&percentSC[0]))
+)
+
+func throwTypeError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
 	p, err := libc.CString(msg)
 	if err != nil {
 		return lib.XJS_ThrowTypeError(tls, ctx, 0, 0)
@@ -1224,14 +1232,14 @@ func throwTypeError(tls *libc.TLS, ctx uintptr, msg string, args ...any) (r lib.
 
 	defer libc.Xfree(tls, p)
 
-	bp := tls.Alloc(8 + 8*len(args))
+	bp := tls.Alloc(16)
 
-	defer tls.Free(8 + 8*len(args))
+	defer tls.Free(16)
 
-	return lib.XJS_ThrowTypeError(tls, ctx, p, libc.VaList(bp+8, args...))
+	return lib.XJS_ThrowTypeError(tls, ctx, percentS, libc.VaList(bp+8, p))
 }
 
-func throwInternalError(tls *libc.TLS, ctx uintptr, msg string, args ...any) (r lib.TJSValue) {
+func throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
 	p, err := libc.CString(msg)
 	if err != nil {
 		return lib.XJS_ThrowInternalError(tls, ctx, 0, 0)
@@ -1239,11 +1247,11 @@ func throwInternalError(tls *libc.TLS, ctx uintptr, msg string, args ...any) (r 
 
 	defer libc.Xfree(tls, p)
 
-	bp := tls.Alloc(8 + 8*len(args))
+	bp := tls.Alloc(16)
 
-	defer tls.Free(8 + 8*len(args))
+	defer tls.Free(16)
 
-	return lib.XJS_ThrowInternalError(tls, ctx, p, libc.VaList(bp+8, args...))
+	return lib.XJS_ThrowInternalError(tls, ctx, percentS, libc.VaList(bp+8, p))
 }
 
 type goFunc struct {
@@ -1478,17 +1486,17 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 	goFuncsMu.Unlock()
 
 	if info == nil {
-		return throwInternalError(tls, ctx, "callback id=%i not registered", magic)
+		return throwInternalError(tls, ctx, fmt.Sprintf("callback id=%d not registered", magic))
 	}
 
 	m := info.vm
 	haveArgs := int(argc)
 	if haveArgs < info.minArgs {
-		return throwTypeError(tls, ctx, "%s", fmt.Sprintf("not enough arguments in call to %s", info.name))
+		return throwTypeError(tls, ctx, fmt.Sprintf("not enough arguments in call to %s", info.name))
 	}
 
 	if info.maxArgs >= 0 && haveArgs > info.maxArgs {
-		return throwTypeError(tls, ctx, "%s", fmt.Sprintf("too many arguments in call to %s", info.name))
+		return throwTypeError(tls, ctx, fmt.Sprintf("too many arguments in call to %s", info.name))
 	}
 
 	var in []reflect.Value
@@ -1502,19 +1510,19 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 		default:
 			v, err := m.value(this, false)
 			if err != nil {
-				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
+				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
 			}
 
 			rv := reflect.ValueOf(v)
 			switch {
 			case !rv.IsValid(): // Javascript null, m.value returns a nil any for it.
 				if !canBeNil(info.in[0]) {
-					return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign null to %s", info.name, info.in[0]))
+					return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign null to %s", info.name, info.in[0]))
 				}
 
 				rv = reflect.Zero(info.in[0])
 			case !rv.Type().AssignableTo(info.in[0]):
-				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), info.in[0]))
+				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), info.in[0]))
 			}
 
 			in = append(in, rv)
@@ -1538,19 +1546,19 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 		default:
 			v, err := m.value(*(*lib.TJSValue)(unsafe.Pointer(argv)), false)
 			if err != nil {
-				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
+				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: argument conversion error: %v", info.name, err))
 			}
 
 			rv := reflect.ValueOf(v)
 			switch {
 			case !rv.IsValid(): // Javascript null, m.value returns a nil any for it.
 				if !canBeNil(typ) {
-					return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign null to %s", info.name, typ))
+					return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign null to %s", info.name, typ))
 				}
 
 				rv = reflect.Zero(typ)
 			case !rv.Type().AssignableTo(typ):
-				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), typ))
+				return throwTypeError(tls, ctx, fmt.Sprintf("calling %s: cannot assign %s to %s", info.name, rv.Type(), typ))
 			}
 
 			in = append(in, rv)
@@ -1566,11 +1574,11 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 	// error — rather than array-wrapping the (value, error) pair.
 	if info.hostFunc {
 		if e, _ := out[1].Interface().(error); e != nil {
-			return throwTypeError(tls, ctx, "%s", e.Error())
+			return throwTypeError(tls, ctx, e.Error())
 		}
 		r, err = m.jsValue(out[0])
 		if err != nil {
-			return throwTypeError(tls, ctx, "%s", fmt.Sprintf("callback %s: %v", info.name, err))
+			return throwTypeError(tls, ctx, fmt.Sprintf("callback %s: %v", info.name, err))
 		}
 		return r
 	}
@@ -1583,21 +1591,21 @@ func callGo(tls *libc.TLS, ctx uintptr, this lib.TJSValue, argc int32, argv uint
 		case isNative(info.out[0]):
 			x, ok := out[0].Interface().(Value)
 			if !ok {
-				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("internal error: native Javascript value does not have type 'Value' (%v:)", origin(1)))
+				return throwTypeError(tls, ctx, fmt.Sprintf("internal error: native Javascript value does not have type 'Value' (%v:)", origin(1)))
 			}
 
 			r = x.v
 		default:
 			r, err = m.jsValue(out[0])
 			if err != nil {
-				return throwTypeError(tls, ctx, "%s", fmt.Sprintf("cannot convert value: %v", err))
+				return throwTypeError(tls, ctx, fmt.Sprintf("cannot convert value: %v", err))
 			}
 		}
 	default:
 		r, err = m.jsArray(out)
 	}
 	if err != nil {
-		return throwTypeError(tls, ctx, "%s", fmt.Sprintf("callback %s: %v", info.name, err))
+		return throwTypeError(tls, ctx, fmt.Sprintf("callback %s: %v", info.name, err))
 	}
 
 	return r
@@ -2355,7 +2363,7 @@ func customModuleNormalize(tls *libc.TLS, ctx uintptr, module_base_name, module_
 
 	normName, err := state.normalize(state.vm, baseName, name)
 	if err != nil {
-		throwTypeError(tls, ctx, "%s", fmt.Sprintf("module normalization failed: %v", err))
+		throwTypeError(tls, ctx, fmt.Sprintf("module normalization failed: %v", err))
 		return 0
 	}
 
@@ -2378,7 +2386,7 @@ func customModuleLoader(tls *libc.TLS, ctx uintptr, module_name uintptr, opaque 
 
 	source, err := state.loader(state.vm, name)
 	if err != nil {
-		throwTypeError(tls, ctx, "%s", fmt.Sprintf("module load failed: %v", err))
+		throwTypeError(tls, ctx, fmt.Sprintf("module load failed: %v", err))
 		return 0
 	}
 
