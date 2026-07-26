@@ -5,6 +5,7 @@
 package quickjs // import "modernc.org/quickjs"
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -124,5 +125,52 @@ func TestRegisterHostFuncValidation(t *testing.T) {
 	})
 	if r, err := m.Eval(`add(2, 3) + id(5)`, EvalGlobal); err != nil || r != 10 {
 		t.Errorf("mixed RegisterFunc/RegisterHostFunc = %#v, %v; want 10", r, err)
+	}
+}
+
+// throwMsg calls a host function failing with errors.New(msg) and returns the
+// resulting error string.
+func throwMsg(t *testing.T, msg string) string {
+	t.Helper()
+	m, err := NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	mustHost(t, m, "boom", func(args []any) (any, error) { return nil, errors.New(msg) })
+	if _, err = m.Eval(`boom()`, EvalGlobal); err == nil {
+		t.Fatal("boom() did not throw")
+	}
+	return err.Error()
+}
+
+// TestThrowMessage checks that a message produced on the Go side reaches
+// Javascript verbatim.
+//
+// It crosses into C through JS_ThrowTypeError, a printf-style function, so it
+// has to travel as a NUL terminated C string argument of a literal "%s" format.
+// Handing a Go string to libc.VaList instead puts the 16 byte {ptr, len} header
+// in the va_list; C reads the first word as a char* and, Go strings not being
+// NUL terminated, runs past the end of the string appending whatever sits next
+// to it on the Go heap. Making the message itself the format is not an option
+// either: messages embed module names and error texts originating in the
+// script, where "%n" would become a write primitive.
+func TestThrowMessage(t *testing.T) {
+	for _, test := range []struct{ name, msg string }{
+		// A substring, so that what follows it in memory is known, and not a NUL.
+		{"overread", ("boom" + "-trailing-garbage")[:len("boom")]},
+		{"percent", "100% done"},
+		{"percentS", "bad value: %s"},
+		{"percentD", "bad value: %d"},
+		{"percentPercent", "literal %% here"},
+		{"percentMix", "%p %x %lu"},
+		{"percentN", "%n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if g, e := throwMsg(t, test.msg), "TypeError: "+test.msg; g != e {
+				t.Errorf("message = %q; want %q", g, e)
+			}
+		})
 	}
 }

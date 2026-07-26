@@ -1216,13 +1216,27 @@ func (m *VM) StdAddHelpers() error {
 	return nil
 }
 
+var (
+	// The C format string used for all messages produced on the Go side. The
+	// message must never be passed as the format itself, it is not a literal
+	// and any '%' in it would be taken for a conversion specification.
+	percentSC = [...]byte{'%', 's', 0}
+	percentS  = uintptr(unsafe.Pointer(&percentSC[0]))
+)
+
 func throwTypeError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
 	p, err := libc.CString(msg)
 	if err != nil {
 		return lib.XJS_ThrowTypeError(tls, ctx, 0, 0)
 	}
+
 	defer libc.Xfree(tls, p)
-	return lib.XJS_ThrowTypeError(tls, ctx, p, 0)
+
+	bp := tls.Alloc(16)
+
+	defer tls.Free(16)
+
+	return lib.XJS_ThrowTypeError(tls, ctx, percentS, libc.VaList(bp+8, p))
 }
 
 func throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue) {
@@ -1230,8 +1244,14 @@ func throwInternalError(tls *libc.TLS, ctx uintptr, msg string) (r lib.TJSValue)
 	if err != nil {
 		return lib.XJS_ThrowInternalError(tls, ctx, 0, 0)
 	}
+
 	defer libc.Xfree(tls, p)
-	return lib.XJS_ThrowInternalError(tls, ctx, p, 0)
+
+	bp := tls.Alloc(16)
+
+	defer tls.Free(16)
+
+	return lib.XJS_ThrowInternalError(tls, ctx, percentS, libc.VaList(bp+8, p))
 }
 
 type goFunc struct {
