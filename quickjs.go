@@ -70,6 +70,10 @@
 //
 // # Change Log
 //
+// 2026-07-27: Upgrade to QuickJS release 2026-06-04. The bytecode format
+// changed, code produced by [VM.Compile] using an older release will no longer
+// load.
+//
 // 2025-10-10: Upgrade to QuickJS release 2025-09-13.
 //
 // [C QuickJS]: https://bellard.org/quickjs

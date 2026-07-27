@@ -752,8 +752,15 @@ func TestBytecode(t *testing.T) {
 	// You just need to update the expected value below!
 	// You can also use this chance to document that something changed.
 	// See: https://gitlab.com/cznic/quickjs/-/merge_requests/3#note_2862847634
+	//
+	// 2026-07-27, QuickJS release 2026-06-04 (libquickjs v0.13.0): The
+	// serialized function header gained a var_ref_count field, that's the extra
+	// zero byte, and variable definitions now record var_ref_idx instead of
+	// scope_level. Opcodes were renumbered, so the code of this script,
+	// push_i8 42; push_i16 314; mul; set_loc0; return, is now encoded as
+	// bb 2a bc 3a 01 98 cb 28, previously bd 2a be 3a 01 9a cd 28.
 	hex := hex.EncodeToString(bytecode)
-	if g, e := hex, "05000c000600a8010001000200000801aa01000000bd2abe3a019acd28a8010400001b0600"; g != e {
+	if g, e := hex, "05000c000600a801000100020000000801aa01000000bb2abc3a0198cb28a8010400001b0600"; g != e {
 		t.Fatalf("got %s, expected %s", g, e)
 	}
 
