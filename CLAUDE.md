@@ -80,7 +80,15 @@ opposite build tags, and **any change to value encoding must be mirrored in both
 - `quickjs32.go` (`//go:build 386 || arm`): `TJSValue` is a `uint64` with explicit NaN-boxing bit math.
 
 Both define the same set: `sizeofJsValue`, `null`, `undefined`, `newFloat`, `newBool`, `tag`,
-`isException`, `jsvToFloat64`, `jsvToPtr`.
+`isException`, `jsvToInt32`, `jsvSetInt32`, `jsvToFloat64`, `jsvToPtr`.
+
+linux/s390x is the only **big-endian** target and it makes the 64-bit union layout observable: `ccgo`
+represents `JSValueUnion` as its widest member, an `uint64`, and accesses the narrow members in the
+*value* domain (`JS_MKVAL` zero-extends into the low 32 bits, `JS_VALUE_GET_INT` truncates). So the
+`int32`/bool payload lives in the low 32 bits, which are the *last* four bytes of the union on s390x.
+Read and write it only through `jsvToInt32`/`jsvSetInt32` — a raw `*(*int32)(unsafe.Pointer(&v))`
+silently decodes every JS integer and boolean as 0/false there. The float64 and pointer payloads are
+as wide as the union itself, so those stay plain casts.
 
 ### C → Go callbacks
 

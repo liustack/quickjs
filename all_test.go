@@ -492,6 +492,14 @@ func testRegisterGoFuncOK(t *testing.T) {
 			a.SetProperty(foo, 533)
 			return 534, a.Dup()
 		}, nil, "var a = {foo: 42, bar: g11}; g11(a);", `[534,{"foo":533}]`},
+
+		// A Go boolean/integer must be a boolean/number for Javascript itself,
+		// not merely a value that decodes back to the Go original. Both
+		// payloads live in the low 32 bits of the JSValue union, which on a big
+		// endian target is not where its first four bytes are.
+		{"g12", false, func() bool { return true }, nil, "g12() === true;", true},
+		{"g13", false, func() bool { return false }, nil, "g13() === false;", true},
+		{"g14", false, func() int { return 542 }, nil, "g14() === 542;", true},
 	} {
 		nm := test.nm
 		if nm == "" {

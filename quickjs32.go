@@ -63,10 +63,22 @@ func newFloat(n float64) (r lib.TJSValue) {
 // }
 
 func newBool(n bool) (r lib.TJSValue) {
+	r = lib.EJS_TAG_BOOL << 32
 	if n {
-		r = 1
+		jsvSetInt32(&r, 1)
 	}
-	return lib.EJS_TAG_BOOL<<32 | r
+	return r
+}
+
+// #define JS_VALUE_GET_INT(v) (int)(v)
+
+func jsvToInt32(v lib.TJSValue) int32 {
+	return int32(v)
+}
+
+// jsvSetInt32 sets the int32 payload of 'v', keeping its tag.
+func jsvSetInt32(v *lib.TJSValue, n int32) {
+	*v = *v&0xffffffff00000000 | lib.TJSValue(uint32(n))
 }
 
 // #define JS_VALUE_GET_TAG(v) (int)((v) >> 32)

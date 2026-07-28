@@ -28,9 +28,9 @@ func newFloat(n float64) (r lib.TJSValue) {
 func newBool(n bool) (r lib.TJSValue) {
 	switch {
 	case n:
-		*(*int32)(unsafe.Pointer(&r)) = 1
+		jsvSetInt32(&r, 1)
 	default:
-		*(*int32)(unsafe.Pointer(&r)) = 0
+		jsvSetInt32(&r, 0)
 	}
 	r.Ftag = lib.EJS_TAG_BOOL
 	return r
@@ -48,6 +48,32 @@ func tag(v lib.TJSValue) int32 {
 
 func jsvToFloat64(v lib.TJSValue) (r float64) {
 	return *(*float64)(unsafe.Pointer(&v))
+}
+
+// #define JS_VALUE_GET_INT(v) ((v).u.int32)
+//
+// The JSValue payload is the eight bytes wide C union JSValueUnion, which
+// modernc.org/libquickjs represents as its widest member, an uint64. The
+// narrower members of that union are accessed in the value domain, not by
+// address: JS_MKVAL(tag, val) zero extends 'val' into the low 32 bits of the
+// uint64 and JS_VALUE_GET_INT truncates the uint64 back to 32 bits. Reading or
+// writing the payload as the first four bytes of the union instead is
+// equivalent on a little endian target only - on s390x those are the high, for
+// an int32 or a boolean always zero, bits.
+//
+// jsvToInt32 must be used for the int32 payload of a JS_TAG_INT and for the
+// boolean payload of a JS_TAG_BOOL. The float64 and pointer payloads are as
+// wide as the union itself, so for those the two domains coincide and no
+// conversion is needed.
+func jsvToInt32(v lib.TJSValue) int32 {
+	return int32(*(*uint64)(unsafe.Pointer(&v)))
+}
+
+// jsvSetInt32 sets the int32 payload of 'v', zero extended over the whole
+// union the way JS_MKVAL does. See jsvToInt32 for why the payload is not
+// written as the first four bytes of the union.
+func jsvSetInt32(v *lib.TJSValue, n int32) {
+	*(*uint64)(unsafe.Pointer(v)) = uint64(uint32(n))
 }
 
 // jsvToPtr extracts the JSModuleDef pointer from a JSValue.

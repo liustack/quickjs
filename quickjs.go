@@ -1126,9 +1126,9 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 	case lib.EJS_TAG_OBJECT: // -1
 		return m.newObject(v)
 	case lib.EJS_TAG_INT: //  0,
-		return int(*(*int32)(unsafe.Pointer(&v))), nil
+		return int(jsvToInt32(v)), nil
 	case lib.EJS_TAG_BOOL: //  1,
-		return *(*int32)(unsafe.Pointer(&v)) != 0, nil
+		return jsvToInt32(v) != 0, nil
 	case lib.EJS_TAG_NULL: //  2,
 		return nil, nil
 	case lib.EJS_TAG_UNDEFINED: //  3,
@@ -1169,7 +1169,7 @@ func errIntProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r int
 
 	switch tag(vr) {
 	case lib.EJS_TAG_INT:
-		return int(*(*int32)(unsafe.Pointer(&vr)))
+		return int(jsvToInt32(vr))
 	case lib.EJS_TAG_FLOAT64:
 		return int(jsvToFloat64(vr))
 	}
