@@ -15,26 +15,13 @@
 // Geomeans of time/op over a set of benchmarks, relative to CCGO, lower number
 // is better. Detailed results available in the testdata/benchmarks directory.
 //
-//	 CCGO: modernc.org/quickjs@v0.18.1
-//	 GOJA: github.com/dop251/goja@v0.0.0-20260311135729-065cd970411c
+//	 CCGO: modernc.org/quickjs@v0.22.0
+//	 GOJA: github.com/dop251/goja@v0.0.0-20260723142020-b4aef50fa347
 //	  QJS: github.com/fastschema/qjs@v0.0.6
 //
 //		                        CCGO     GOJA     QJS
 //		-----------------------------------------------
-//		        darwin/amd64    1.000    1.131    0.891
-//		        darwin/arm64    1.000    0.951    0.935
-//		       freebsd/amd64    1.000    1.382    1.071    (qemu)
-//		       freebsd/arm64    1.000    1.571    0.813    (qemu)
-//		           linux/386    1.000    1.729   56.635    (qemu)
-//		         linux/amd64    1.000    1.423    1.139
-//		           linux/arm    1.000    2.235   86.618
-//		         linux/arm64    1.000    1.372    1.030
-//		       linux/loong64    1.000    1.788   75.851
-//		       linux/ppc64le    1.000    1.368   43.548
-//		       linux/riscv64    1.000    1.668   60.587
-//		         linux/s390x    1.000    1.219   45.730    (qemu)
-//		       windows/amd64    1.000    1.330    1.050
-//		       windows/arm64    1.000    1.511    1.200
+//		         linux/amd64    1.000    1.030    0.752
 //		-----------------------------------------------
 //		                        CCGO     GOJA     QJS
 //
