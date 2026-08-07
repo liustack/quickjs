@@ -41,8 +41,8 @@ work:
 	go work init
 	go work use .
 	go work use ./compare
-	go work use ../libc
-	go work use ../libquickjs
+	if [ -d ../libc ]; then go work use ../libc; fi
+	if [ -d ../libquickjs ]; then go work use ../libquickjs; fi
 
 cpu:
 	make -C ./compare cpu

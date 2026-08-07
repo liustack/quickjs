@@ -36,10 +36,22 @@ before considering a change done.
 
 ### Local dev environment
 
-`go.work` (untracked; regenerate with `make work`) wires in **sibling checkouts** of the transpiled
-dependencies — development assumes `../libc` (`modernc.org/libc`) and `../libquickjs`
-(`modernc.org/libquickjs`) exist next to this repo. Edits to the value representation or new binding
-surface usually require the matching `libquickjs` version to be present locally.
+**There is normally no `go.work`.** The whole repo — including `make benchmark` in `compare/`, which
+reaches the root module through its `replace` — builds and tests in plain module mode. `go.work` is
+untracked (global gitignore) and `make clean` deletes it; treat it as a temporary tool, not config.
+
+Create one with `make work` for exactly one situation: **co-developing the sibling checkouts** of the
+transpiled dependencies, `../libc` (`modernc.org/libc`) and `../libquickjs` (`modernc.org/libquickjs`).
+Changes to the value representation or new binding surface usually need an unreleased `libquickjs`
+next door. Delete it (`make clean`, or `rm -f go.work go.work.sum`) once those land in a release, or
+the tree keeps building against whatever is in the sibling working copy rather than the pinned version.
+
+While a `go.work` exists it must keep listing `./compare`: a workspace is found by walking up from the
+cwd, so it also governs builds inside `compare/`, which then fail with `main module
+(modernc.org/quickjs) does not contain package modernc.org/quickjs/compare`. `make work` also stamps
+the current toolchain into the `go` line — a `go.work` left over from an older toolchain, below
+`compare/go.mod`'s `go` version, breaks `make benchmark` with `module . listed in go.work file
+requires go >= …`.
 
 ### Memgrind (leak detection)
 
@@ -114,16 +126,24 @@ entry point that runs JS, remember to call `configureInterrupt()` or the timeout
   via `Register(obj Value)` (JS names are lower-cased, e.g. `fmt.println`).
 - `compare/` — **separate module** (`modernc.org/quickjs/compare`, own `go.mod`) benchmarking this
   engine against `github.com/dop251/goja` and `github.com/fastschema/qjs`, plus the arewefastyet V8
-  suite in `internal/arewefastyet/`. `make benchmark` runs here.
+  suite in `internal/arewefastyet/`. `make benchmark` runs here. It is its own module so that the
+  benchmark-only deps (goja, qjs, wazero, regexp2, …) and its newer `go` directive stay out of the
+  library's `go.mod`, where every consumer would see them. `compare/go.mod` carries
+  `replace modernc.org/quickjs => ../`, so the benchmarks always build the working tree and
+  `go mod tidy` derives `libquickjs`/`libc` from the root `go.mod` — never hand-sync those versions.
+  The `modernc.org/quickjs vX.Y.Z` require line is *not* resolved (the replace wins); it is only
+  `generator.go`'s benchmark key, see below.
 - `internal/autogen/*.mod` — 15 per-`GOOS_GOARCH` snapshots of `go.mod`, maintained by the
   modernc.org builder's "autogen" feature (see `builder.json`); the recent "<arch> auto generate"
   commits are these. Don't hand-edit.
 - `testdata/benchmarks/<qjs-version>/<os>_<arch>.txt` — recorded benchmark geomeans.
 - `generator.go` (`//go:build ignore`, standalone `package main`, run via `//go:generate go run
   generator.go`): runs `make benchmark`, reads the geomean rows from
-  `testdata/benchmarks/<version>/*.txt` (version taken from `compare/go.mod`), and **rewrites the
-  `# Performance` table inside the `quickjs.go` package doc comment**. If you edit that table by hand it
-  will be overwritten.
+  `testdata/benchmarks/<version>/*.txt` (version taken from the `modernc.org/quickjs` require line in
+  `compare/go.mod`), and **rewrites the `# Performance` table inside the `quickjs.go` package doc
+  comment**. If you edit that table by hand it will be overwritten. It returns early when
+  `testdata/benchmarks/<version>/<goos>_<goarch>.txt` already exists, so bumping that require line is
+  the deliberate "re-measure on every builder platform" switch.
 
 ## Supported platforms
 
