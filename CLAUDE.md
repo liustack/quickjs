@@ -21,7 +21,7 @@ make test          # go test -failfast -v -timeout 24h -count=1 ./...
 make shorttest     # same, adds -short (skips long-running cases)
 make leak          # go test -v -run TestMemgrind2 -tags=libc.memgrind  (leak detection)
 make benchmark     # delegates to ./compare (see below)
-make build_all_targets   # cross-build + compile test binary for all 15 GOOS/GOARCH, ±libc.memgrind
+make build_all_targets   # cross-build + compile test binary for all 14 GOOS/GOARCH, ±libc.memgrind
 ```
 
 Run a single test / subtest:
@@ -131,9 +131,11 @@ entry point that runs JS, remember to call `configureInterrupt()` or the timeout
   library's `go.mod`, where every consumer would see them. `compare/go.mod` carries
   `replace modernc.org/quickjs => ../`, so the benchmarks always build the working tree and
   `go mod tidy` derives `libquickjs`/`libc` from the root `go.mod` — never hand-sync those versions.
+  Its indirect requires are only lower bounds, and a bump in the root `go.mod` otherwise stops the
+  benchmarks with `updates to go.mod needed`, so the `benchmark` target runs `go mod tidy` first.
   The `modernc.org/quickjs vX.Y.Z` require line is *not* resolved (the replace wins); it is only
   `generator.go`'s benchmark key, see below.
-- `internal/autogen/*.mod` — 15 per-`GOOS_GOARCH` snapshots of `go.mod`, maintained by the
+- `internal/autogen/*.mod` — 14 per-`GOOS_GOARCH` snapshots of `go.mod`, maintained by the
   modernc.org builder's "autogen" feature (see `builder.json`); the recent "<arch> auto generate"
   commits are these. Don't hand-edit.
 - `testdata/benchmarks/<qjs-version>/<os>_<arch>.txt` — recorded benchmark geomeans.
@@ -147,6 +149,6 @@ entry point that runs JS, remember to call `configureInterrupt()` or the timeout
 
 ## Supported platforms
 
-15 combos (see the `quickjs.go` package doc and `builder.json`): darwin/{amd64,arm64},
+14 combos (see the `quickjs.go` package doc and `builder.json`): darwin/{amd64,arm64},
 freebsd/{amd64,arm64}, linux/{386,amd64,arm,arm64,loong64,ppc64le,riscv64,s390x}, windows/{amd64,arm64}.
 Changes must keep `make build_all_targets` green across all of them.

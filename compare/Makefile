@@ -8,7 +8,11 @@ all: editor
 	golint 2>&1
 	staticcheck 2>&1
 
+# The indirect requires here are only lower bounds; go mod tidy re-derives them
+# from ../go.mod, which "replace modernc.org/quickjs => ../" makes authoritative.
+# Without it a dependency bump in ../go.mod fails with "updates to go.mod needed".
 benchmark:
+	go mod tidy
 	go test -vet=off -timeout 24h -run @ -bench . -benchtime 5s | go run benchreport.go
 
 clean:
