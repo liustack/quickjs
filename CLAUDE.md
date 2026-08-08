@@ -133,19 +133,29 @@ entry point that runs JS, remember to call `configureInterrupt()` or the timeout
   `go mod tidy` derives `libquickjs`/`libc` from the root `go.mod` — never hand-sync those versions.
   Its indirect requires are only lower bounds, and a bump in the root `go.mod` otherwise stops the
   benchmarks with `updates to go.mod needed`, so the `benchmark` target runs `go mod tidy` first.
-  The `modernc.org/quickjs vX.Y.Z` require line is *not* resolved (the replace wins); it is only
-  `generator.go`'s benchmark key, see below.
+  The `modernc.org/quickjs vX.Y.Z` require line is *not* resolved (the replace wins) and nothing reads
+  it; keep it at or below the newest tag, `modernc.org/gomod`'s updater — the fleet's autodeps — errors
+  out on a require ahead of the local clone.
 - `internal/autogen/*.mod` — 14 per-`GOOS_GOARCH` snapshots of `go.mod`, maintained by the
   modernc.org builder's "autogen" feature (see `builder.json`); the recent "<arch> auto generate"
-  commits are these. Don't hand-edit.
-- `testdata/benchmarks/<qjs-version>/<os>_<arch>.txt` — recorded benchmark geomeans.
+  commits are these. Don't hand-edit. Emptying them is how you ask the fleet to re-run `go generate`
+  on every platform: the builder regenerates when the snapshot differs from the root `go.mod`.
+- `testdata/benchmarks/<os>_<arch>.txt` — recorded benchmark output, one file per platform, first line
+  `# root go.mod sha256 <hex>` recording what it was measured against.
 - `generator.go` (`//go:build ignore`, standalone `package main`, run via `//go:generate go run
-  generator.go`): runs `make benchmark`, reads the geomean rows from
-  `testdata/benchmarks/<version>/*.txt` (version taken from the `modernc.org/quickjs` require line in
-  `compare/go.mod`), and **rewrites the `# Performance` table inside the `quickjs.go` package doc
-  comment**. If you edit that table by hand it will be overwritten. It returns early when
-  `testdata/benchmarks/<version>/<goos>_<goarch>.txt` already exists, so bumping that require line is
-  the deliberate "re-measure on every builder platform" switch.
+  generator.go`): runs `make benchmark` for the host platform and **rewrites the `# Performance` table
+  inside the `quickjs.go` package doc comment** from the geomean rows of every
+  `testdata/benchmarks/*.txt`. If you edit that table by hand it will be overwritten. The `CCGO:` label
+  is the `modernc.org/libquickjs` version from the root `go.mod` — the engine that was measured; the
+  `GOJA:`/`QJS:` labels come from `compare/go.mod`, where they *are* resolved.
+
+  It benchmarks only when `testdata/benchmarks/<goos>_<goarch>.txt` is missing or its recorded
+  fingerprint differs from the current root `go.mod`, then re-renders the table unconditionally
+  (rendering is idempotent, so a builder with nothing to measure commits nothing). Keying on the root
+  `go.mod` makes "the fleet regenerated" and "these numbers are stale" the same event: the builder's
+  own autogen gate compares that same file against `internal/autogen/<goos>_<goarch>.mod`. Nothing has
+  to be bumped by hand to re-measure — but note a local `go generate` after a dependency bump does run
+  the full benchmark suite.
 
 ## Supported platforms
 

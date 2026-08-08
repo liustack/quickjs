@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,14 +25,23 @@ import (
 
 const (
 	docFn = "quickjs.go"
+	modFn = "go.mod"
 	qemu  = "    (qemu)"
+
+	// fingerprintPrefix starts the first line of a results file, recording the
+	// root go.mod the numbers below it were measured against. The benchmarks
+	// re-run when that no longer matches, ie. exactly when a builder
+	// regenerates: its autogen gate compares the same go.mod against
+	// internal/autogen/<goos>_<goarch>.mod. Nothing needs bumping by hand.
+	fingerprintPrefix = "# root go.mod sha256 "
 )
 
 var (
-	goos   = runtime.GOOS
-	goarch = runtime.GOARCH
-	target = fmt.Sprintf("%s_%s", goos, goarch) + ".txt"
-	notes  = map[string]string{
+	goos       = runtime.GOOS
+	goarch     = runtime.GOARCH
+	target     = fmt.Sprintf("%s_%s", goos, goarch) + ".txt"
+	resultsDir = path.Join("testdata", "benchmarks")
+	notes      = map[string]string{
 		"freebsd/amd64": qemu,
 		"freebsd/arm64": qemu,
 		"linux/386":     qemu,
@@ -47,40 +57,120 @@ func fail(rc int, s string, args ...any) {
 }
 
 func main() {
-	fn := path.Join("compare", "go.mod")
-	b, err := os.ReadFile(fn)
+	fp, err := fingerprint()
 	if err != nil {
 		fail(1, "%v", err)
+	}
+
+	resultsFn := path.Join(resultsDir, target)
+	ok, err := measured(resultsFn, fp)
+	if err != nil {
+		fail(1, "%v", err)
+	}
+
+	switch {
+	case ok:
+		fmt.Printf("%s: measured against the current %s, skipping benchmarks\n", resultsFn, modFn)
+	default:
+		fmt.Printf("%s: missing or measured against a different %s, benchmarking\n", resultsFn, modFn)
+		if err := benchmark(resultsFn, fp); err != nil {
+			fail(1, "%v", err)
+		}
+	}
+
+	// Unconditional: keeps the package documentation in sync with
+	// testdata/benchmarks even when this platform had nothing to measure.
+	if err := document(); err != nil {
+		fail(1, "%v", err)
+	}
+}
+
+// fingerprint returns the first line of a results file produced now.
+func fingerprint() (string, error) {
+	b, err := os.ReadFile(modFn)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s%x", fingerprintPrefix, sha256.Sum256(b)), nil
+}
+
+// measured reports whether fn holds results recorded for fingerprint fp. A
+// missing file, or one predating fingerprintPrefix, is not measured.
+func measured(fn, fp string) (bool, error) {
+	b, err := os.ReadFile(fn)
+	switch {
+	case err == nil:
+		line, _, _ := bytes.Cut(b, []byte("\n"))
+		return string(line) == fp, nil
+	case os.IsNotExist(err):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// benchmark runs the ./compare module and records its report in fn, stamped
+// with fp.
+func benchmark(fn, fp string) error {
+	if err := os.MkdirAll(resultsDir, 0775); err != nil {
+		return err
+	}
+
+	var stdout, stderr bytes.Buffer
+	// Through a shell: on Windows the builders run 'go generate' from git-bash
+	// and make lives there.
+	cmd := exec.Command("sh", "-c", "make benchmark")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("make benchmark: %v\nstdout=%s\nstderr=%s", err, stdout.Bytes(), stderr.Bytes())
+	}
+
+	// Only on success: a partial file carrying the current fingerprint would
+	// pass for measured and suppress the retry the next cycle owes us.
+	return os.WriteFile(fn, append([]byte(fp+"\n"), stdout.Bytes()...), 0660)
+}
+
+// requires returns the versions of the modules required by the go.mod at fn,
+// keyed by module path.
+func requires(fn string) (map[string]string, error) {
+	b, err := os.ReadFile(fn)
+	if err != nil {
+		return nil, err
 	}
 
 	mod, err := modfile.ParseLax(fn, b, nil)
 	if err != nil {
-		fail(1, "%v", err)
+		return nil, err
 	}
 
-	versionsByPath := map[string]string{} // path: version
+	r := map[string]string{}
 	for _, v := range mod.Require {
-		versionsByPath[v.Mod.Path] = v.Mod.Version
+		r[v.Mod.Path] = v.Mod.Version
 	}
-	quickjsVersion := versionsByPath["modernc.org/quickjs"]
-	resultsDir := path.Join("testdata", "benchmarks", quickjsVersion)
-	resultsFn := path.Join(resultsDir, target)
-	if fi, err := os.Stat(resultsFn); err == nil && fi.Mode().IsRegular() {
-		return // done
-	}
+	return r, nil
+}
 
-	os.Remove(resultsFn)
-	os.MkdirAll(resultsDir, 0775)
-
-	out, err := exec.Command("sh", "-c", fmt.Sprintf("make benchmark > %s", resultsFn)).CombinedOutput()
-	fmt.Printf("err=%v out=%s\n", err, out)
+// document rewrites the '# Performance' section of the docFn package
+// documentation from every results file present.
+func document() error {
+	// The measured engine comes from the root go.mod. The compare module gets
+	// this one through a 'replace' pointing at the work tree, so its own
+	// modernc.org/quickjs require records nothing about what ran.
+	root, err := requires(modFn)
 	if err != nil {
-		fail(1, "err=%v out=%s", err, out)
+		return err
+	}
+
+	compare, err := requires(path.Join("compare", "go.mod"))
+	if err != nil {
+		return err
 	}
 
 	m, err := filepath.Glob(path.Join(resultsDir, "*.txt"))
 	if err != nil {
-		fail(1, "err=%v", err)
+		return err
 	}
 
 	for i, v := range m {
@@ -90,7 +180,7 @@ func main() {
 	for _, fn := range m {
 		result, err := os.ReadFile(fn)
 		if err != nil {
-			fail(1, "err=%v", err)
+			return err
 		}
 
 		key := path.Base(fn)                    // os_arch.txt
@@ -118,14 +208,14 @@ func main() {
 	})
 	doc, err := os.ReadFile(docFn)
 	if err != nil {
-		fail(1, "err=%v", err)
+		return err
 	}
 
 	a := strings.Split(string(doc), "\n")
 	buf := bytes.NewBuffer(nil)
 	state := 0
-	ver := func(ip string) string {
-		return fmt.Sprintf("%s@%s", ip, versionsByPath[ip])
+	ver := func(ip string, versions map[string]string) string {
+		return fmt.Sprintf("%s@%s", ip, versions[ip])
 	}
 	for _, v := range a {
 		switch state {
@@ -141,14 +231,14 @@ func main() {
 //
 //  CCGO: %s
 //  GOJA: %s
-//   QJS: %s 
-//  
+//   QJS: %s
+//
 //	                        CCGO     GOJA     QJS
 //	-----------------------------------------------
 `,
-				ver("modernc.org/quickjs"),
-				ver("github.com/dop251/goja"),
-				ver("github.com/fastschema/qjs"),
+				ver("modernc.org/libquickjs", root),
+				ver("github.com/dop251/goja", compare),
+				ver("github.com/fastschema/qjs", compare),
 			)
 			for _, v := range results {
 				fmt.Fprintf(buf, "//	%20s%9s%9s%9s%s\n", v[0], v[1], v[2], v[3], notes[v[0]])
@@ -168,8 +258,15 @@ func main() {
 		}
 	}
 	if err := os.WriteFile(docFn, buf.Bytes(), 0660); err != nil {
-		fail(1, "err=%v", err)
+		return err
 	}
+
+	// The builders gofmt after generating, a local 'go generate' does not.
+	if out, err := exec.Command("gofmt", "-s", "-w", docFn).CombinedOutput(); err != nil {
+		return fmt.Errorf("gofmt %s: %v\n%s", docFn, err, out)
+	}
+
+	return nil
 }
 
 // origin returns caller's short position, skipping skip frames.

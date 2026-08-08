@@ -15,7 +15,7 @@
 // Geomeans of time/op over a set of benchmarks, relative to CCGO, lower number
 // is better. Detailed results available in the testdata/benchmarks directory.
 //
-//	 CCGO: modernc.org/quickjs@v0.22.0
+//	 CCGO: modernc.org/libquickjs@v0.13.1
 //	 GOJA: github.com/dop251/goja@v0.0.0-20260723142020-b4aef50fa347
 //	  QJS: github.com/fastschema/qjs@v0.0.6
 //

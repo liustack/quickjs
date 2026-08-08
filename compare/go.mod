@@ -7,9 +7,10 @@ replace modernc.org/quickjs => ../
 require (
 	github.com/dop251/goja v0.0.0-20260723142020-b4aef50fa347
 	github.com/fastschema/qjs v0.0.6
-	// Replaced by ../, so this version is not resolved. It is the
-	// testdata/benchmarks/<version> key of ../generator.go: bump it to
-	// re-record the benchmarks in the package documentation.
+	// Replaced by ../, so this version is not resolved and nothing reads it.
+	// Keep it at or below the newest tag: modernc.org/gomod's updater, which
+	// drives the fleet's autodeps, ignores replaces and fails on a require
+	// ahead of the local clone.
 	modernc.org/quickjs v0.22.0
 )
 
