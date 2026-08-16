@@ -136,10 +136,15 @@ entry point that runs JS, remember to call `configureInterrupt()` or the timeout
     `globalThis` once it holds them. Nothing here touches a `Value`, so there is no `Dup`/`Free`
     discipline to get wrong — `intl/memgrind_test.go` guards that (and `make leak` now runs `./...`).
   - Locale data is en-US only: Go ships zoneinfo but no CLDR. The tables in `data.go` were extracted
-    from ICU, not hand-written, and the output was diffed expression-by-expression against node's
-    `Intl` — do that again (`node` + a `TZ=UTC` corpus) before trusting a change to the formatters.
-    Where CLDR data is missing the code falls back to something derivable (a GMT offset for a long
-    time zone name, the code for a currency name), never to a guess.
+    from ICU, not hand-written. Where CLDR data is missing the code falls back to something
+    derivable (a GMT offset for a long time zone name, the code for a currency name), never to a
+    guess.
+  - **`intl/icu_test.go` is the check that matters** after touching a formatter: `TestAgainstICU`
+    evaluates ~4000 expressions in both node's `Intl` and this package and fails on any difference
+    not in its table of four known, documented ones. It skips when `node` is absent (so the fleet
+    never runs it) and in `-short` mode. The spec says what the options mean; only CLDR knows that
+    a minute beside an hour grows a leading zero while a minute alone does not — do not "fix" a
+    formatter against the prose without running this.
 - `compare/` — **separate module** (`modernc.org/quickjs/compare`, own `go.mod`) benchmarking this
   engine against `github.com/dop251/goja` and `github.com/fastschema/qjs`, plus the arewefastyet V8
   suite in `internal/arewefastyet/`. `make benchmark` runs here. It is its own module so that the

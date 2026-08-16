@@ -81,7 +81,12 @@ func TestIntlExists(t *testing.T) {
 
 // TestSvelteKitStart is the constructor from the client start of a SvelteKit
 // app, the shape that made this package necessary: on a VM without Intl it
-// throws a ReferenceError which the framework turns into a reload loop.
+// throws a ReferenceError, and the framework's fallback for a failed start is
+// a hard navigation to the same URL, so the throw repeats forever.
+//
+// It is not by itself an acceptance test for any page. The one this came from
+// needed a second, unrelated fix on the embedder's side before it settled, and
+// either blocker alone was enough to keep it looping.
 func TestSvelteKitStart(t *testing.T) {
 	vm := newVM(t)
 	evalTests(t, vm, [][2]string{
@@ -373,6 +378,45 @@ func TestLocalTimeZone(t *testing.T) {
 	}
 
 	t.Logf("localTimeZone() = %q", tz)
+}
+
+// TestRegisterPerRealm covers what an embedder giving every document its own
+// realm runs into: a VM swapped in for another does not inherit Intl, and
+// registering again on a VM that already has it has to stay harmless.
+func TestRegisterPerRealm(t *testing.T) {
+	vm := newVM(t)
+	if got := fmt.Sprint(eval(t, vm, `typeof Intl`)); got != "object" {
+		t.Fatalf("got %q, want %q", got, "object")
+	}
+
+	// The replacement realm starts without it.
+	next, err := quickjs.NewVM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer next.Close()
+
+	if got := fmt.Sprint(eval(t, next, `typeof Intl`)); got != "undefined" {
+		t.Fatalf("a fresh VM already has Intl: got %q", got)
+	}
+
+	if err := Register(next, TimeZone("UTC")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Registering again says so rather than dropping the second call's options
+	// or failing on a duplicate host function name.
+	err = Register(next, TimeZone("Asia/Tokyo"))
+	if err == nil || !strings.Contains(err.Error(), "already has Intl") {
+		t.Errorf("second Register: got %v, want an already-registered error", err)
+	}
+
+	evalTests(t, next, [][2]string{
+		{`new Intl.DateTimeFormat('en-US').format(new Date(0))`, "1/1/1970"},
+		{`new Date(0).toLocaleString('en-US', {timeZone: 'America/New_York'})`, "12/31/1969, 7:00:00 PM"},
+		{`(1234.5).toLocaleString('en-US')`, "1,234.5"},
+	})
 }
 
 func TestRegisterOnManyVMs(t *testing.T) {

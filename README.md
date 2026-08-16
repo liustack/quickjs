@@ -16,7 +16,13 @@ See also the original [C QuickJS] library.
 The engine has no `Intl`: ECMA-402 is not implemented by the C library this
 package wraps. Package [quickjs/intl] adds `Intl.DateTimeFormat` and
 `Intl.NumberFormat`, en-US over Go's time zone database, for a VM that opts in
-by calling its `Register`.
+by calling its `Register` — once per VM, including one created to replace
+another, because `Intl` lives on that VM's global object.
+
+Resolving IANA time zone names needs a zoneinfo database. Go reads the
+operating system's, or the copy `time/tzdata` embeds in the binary. That import
+belongs in a program's main package rather than in a library, so neither
+package makes it for you.
 
 [C QuickJS]: https://bellard.org/quickjs
 [quickjs/intl]: https://pkg.go.dev/modernc.org/quickjs/intl

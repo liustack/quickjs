@@ -48,10 +48,11 @@
 //
 // # Differences from a browser
 //
-// The en-US output was checked expression by expression against a full ICU -
+// The en-US output is checked expression by expression against a full ICU -
 // node's Intl - over a few thousand combinations of options, values, instants
-// and time zones, and agrees with it except where the data is missing (above)
-// or where ICU disagrees with itself:
+// and time zones by TestAgainstICU, which runs whenever node is installed. It
+// agrees except where the data is missing (above) or where ICU disagrees with
+// itself:
 //
 //   - The space before AM or PM is an ordinary one. V8 writes U+202F there in
 //     formatToParts but an ordinary space in format, and one separator has to
@@ -68,7 +69,11 @@
 //	import _ "time/tzdata"
 //
 // A binary that has to run on Windows or in a scratch container wants that
-// import. The default zone, which is also what
+// import - and it belongs in that binary's main package, not in a library.
+// Importing it from a library adds a few hundred KB to every program that
+// links the library and takes the choice away from the ones that would rather
+// use the host's database, so this package does not import it. The default
+// zone, which is also what
 // Intl.DateTimeFormat().resolvedOptions().timeZone reports, is recovered from
 // $TZ, /etc/localtime or /etc/timezone - Go's time.Local does not carry its
 // name. [TimeZone] sets it explicitly when none of those can answer.
@@ -78,7 +83,9 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -118,9 +125,25 @@ func TimeZone(name string) Option { return func(c *config) { c.timeZone = name }
 // methods ECMA-402 defines in terms of it. See the package documentation for
 // what is and is not implemented.
 //
-// It is safe to call at most once per VM. The formatters it installs hold no
-// state outside the VM, so nothing has to be released; vm.Close does it all.
+// Call it on every VM that is to have Intl, including one created to replace
+// another. A VM is a javascript realm, Intl lives on that realm's global
+// object and it does not migrate: an embedder that gives each document a fresh
+// realm - the only way to empty one, see [quickjs.VM] - has to register per
+// document rather than once at startup, or the second document is back to a
+// ReferenceError.
+//
+// Registering a second time on the same VM is an error rather than a silent
+// no-op, because it would otherwise drop that call's options. The formatters
+// hold no state outside the VM, so nothing has to be released; vm.Close does
+// it all.
 func Register(vm *quickjs.VM, opts ...Option) error {
+	switch already, err := registered(vm); {
+	case err != nil:
+		return err
+	case already:
+		return fmt.Errorf("intl: this VM already has Intl; a VM created to replace a realm needs its own Register")
+	}
+
 	c := &config{}
 	for _, o := range opts {
 		o(c)
@@ -149,6 +172,21 @@ func Register(vm *quickjs.VM, opts ...Option) error {
 	}
 	_, err := vm.Eval(shim, quickjs.EvalGlobal)
 	return err
+}
+
+// marker is the well known symbol the shim stamps on the Intl object it
+// installs, keyed by this package's import path.
+const marker = "modernc.org/quickjs/intl"
+
+// registered reports whether this package has already installed Intl on vm.
+func registered(vm *quickjs.VM) (bool, error) {
+	v, err := vm.Eval("globalThis.Intl !== undefined && globalThis.Intl[Symbol.for("+strconv.Quote(marker)+")] === true", quickjs.EvalGlobal)
+	if err != nil {
+		return false, err
+	}
+
+	b, _ := v.(bool)
+	return b, nil
 }
 
 // dtfResolve resolves the options of a new Intl.DateTimeFormat and returns the
