@@ -122,8 +122,24 @@ entry point that runs JS, remember to call `configureInterrupt()` or the timeout
 
 ## Sub-packages and generated assets
 
-- `fmt/` — module `modernc.org/quickjs/fmt`; exposes Go's `fmt.Printf/Println/Sprintf/Sprintln` to a VM
-  via `Register(obj Value)` (JS names are lower-cased, e.g. `fmt.println`).
+- `fmt/` — package `modernc.org/quickjs/fmt` of *this* module (no `go.mod` of its own, unlike
+  `compare/`); exposes Go's `fmt.Printf/Println/Sprintf/Sprintln` to a VM via `Register(obj Value)`
+  (JS names are lower-cased, e.g. `fmt.println`).
+- `intl/` — package `modernc.org/quickjs/intl`, also part of this module: an opt-in ECMA-402
+  (`Intl.DateTimeFormat`, `Intl.NumberFormat`) implementation in Go, installed by
+  `Register(vm *VM, opts ...Option)`. QuickJS has no `Intl` — neither Bellard's engine nor quickjs-ng
+  implements it, so it is not a build option — and a page reaching for `Intl` gets a `ReferenceError`.
+  Register also replaces the `toLocale*` methods, which ECMA-402 redefines in terms of those two
+  constructors and whose QuickJS fallbacks silently ignore the `timeZone` argument.
+  - The javascript surface lives in `intl.js` (`go:embed`ed by `intl.go`) and every formatting
+    decision in Go; they trade JSON over five `RegisterHostFunc` bridges that the shim deletes from
+    `globalThis` once it holds them. Nothing here touches a `Value`, so there is no `Dup`/`Free`
+    discipline to get wrong — `intl/memgrind_test.go` guards that (and `make leak` now runs `./...`).
+  - Locale data is en-US only: Go ships zoneinfo but no CLDR. The tables in `data.go` were extracted
+    from ICU, not hand-written, and the output was diffed expression-by-expression against node's
+    `Intl` — do that again (`node` + a `TZ=UTC` corpus) before trusting a change to the formatters.
+    Where CLDR data is missing the code falls back to something derivable (a GMT offset for a long
+    time zone name, the code for a currency name), never to a guess.
 - `compare/` — **separate module** (`modernc.org/quickjs/compare`, own `go.mod`) benchmarking this
   engine against `github.com/dop251/goja` and `github.com/fastschema/qjs`, plus the arewefastyet V8
   suite in `internal/arewefastyet/`. `make benchmark` runs here. It is its own module so that the

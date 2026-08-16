@@ -51,7 +51,7 @@ mem:
 	make -C ./compare mem
 
 leak:
-	go test -v -run TestMemgrind2 -tags=libc.memgrind
+	go test -v -run TestMemgrind2 -tags=libc.memgrind ./...
 
 cover:
 	cover=$(shell mktemp) ; \

@@ -10,6 +10,15 @@
 //
 // See also the original [C QuickJS] library.
 //
+// # Internationalization
+//
+// The engine has no Intl. ECMA-402 is not implemented by the C library this
+// package wraps, so a page or bundle reaching for Intl.DateTimeFormat gets a
+// ReferenceError, and the toLocale* methods it ships ignore both their locale
+// and their timeZone argument. Package [modernc.org/quickjs/intl] provides
+// Intl.DateTimeFormat and Intl.NumberFormat, en-US over Go's time zone
+// database, for a VM that opts in by calling its Register.
+//
 // # Performance
 //
 // Geomeans of time/op over a set of benchmarks, relative to CCGO, lower number
