@@ -1055,6 +1055,38 @@ func (m *VM) call(f, this lib.TJSValue, args ...any) (r any, err error) {
 	return m.value(lib.XJS_Call(tls, ctx, f, this, int32(len(jsArgs)), argv), true)
 }
 
+// goString converts the JS value 'v' to a Go string; the JS -> Go half of the
+// string bridge, JS_NewStringLen being the other.
+//
+// It is length-based on purpose. JS_ToCString hands out a NUL-terminated
+// buffer, but a JavaScript string is a sequence of UTF-16 code units and U+0000
+// is an ordinary one - a binary string built with String.fromCharCode, btoa's
+// argument, pixel data - so libc.GoString over that buffer cut every such string
+// at its first NUL, and a host function could not tell a truncated argument
+// from a short one. JS_ToCStringLen2 reports the length instead, and the bytes
+// are copied out before the buffer is released.
+//
+// Like JS_ToCString it returns "" when the conversion throws, leaving the
+// exception pending.
+func goString(tls *libc.TLS, ctx uintptr, v lib.TJSValue) string {
+	// The out-parameter lives on the emulated C stack, never the Go stack: the
+	// transpiled callee holds it as a uintptr, which a Go stack move would leave
+	// dangling.
+	usize := int(unsafe.Sizeof(libc.Tsize_t(0)))
+	plen := tls.Alloc(usize)
+
+	defer tls.Free(usize)
+
+	p := lib.XJS_ToCStringLen2(tls, ctx, plen, v, 0)
+	if p == 0 {
+		return ""
+	}
+
+	defer lib.XJS_FreeCString(tls, ctx, p)
+
+	return string(unsafe.Slice((*byte)(unsafe.Pointer(p)), *(*libc.Tsize_t)(unsafe.Pointer(plen))))
+}
+
 func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
 	tls := m.runtime.tls
 	ctx := m.cContext
@@ -1066,11 +1098,7 @@ func (m *VM) newObject(v lib.TJSValue) (r *Object, err error) {
 		return nil, m.errFromException()
 	}
 
-	p := lib.XToCString(tls, ctx, json)
-
-	defer lib.XJS_FreeCString(tls, ctx, p)
-
-	return &Object{json: libc.GoString(p)}, nil
+	return &Object{json: goString(tls, ctx, json)}, nil
 }
 
 var (
@@ -1113,12 +1141,8 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 
 		defer lib.XFreeValue(tls, ctx, jsString)
 
-		p := lib.XToCString(tls, ctx, jsString)
-
-		defer lib.XJS_FreeCString(tls, ctx, p)
-
 		n := big.NewInt(0)
-		if _, ok := n.SetString(libc.GoString(p), 16); !ok {
+		if _, ok := n.SetString(goString(tls, ctx, jsString), 16); !ok {
 			return nil, fmt.Errorf("big.Int.SetString failed")
 		}
 
@@ -1127,11 +1151,7 @@ func (m *VM) value(v lib.TJSValue, free bool) (r any, err error) {
 		lib.EJS_TAG_STRING_ROPE, // -6,
 		lib.EJS_TAG_STRING:      // -7,
 
-		p := lib.XToCString(tls, ctx, v)
-
-		defer lib.XJS_FreeCString(tls, ctx, p)
-
-		return libc.GoString(p), nil
+		return goString(tls, ctx, v), nil
 	case lib.EJS_TAG_OBJECT: // -1
 		return m.newObject(v)
 	case lib.EJS_TAG_INT: //  0,
@@ -1159,11 +1179,7 @@ func errStrProp(tls *libc.TLS, ctx uintptr, v lib.TJSValue, name uintptr) (r str
 	defer lib.XFreeValue(tls, ctx, vr)
 
 	if tag(vr) == lib.EJS_TAG_STRING || tag(vr) == lib.EJS_TAG_STRING_ROPE {
-		p := lib.XToCString(tls, ctx, vr)
-
-		defer lib.XJS_FreeCString(tls, ctx, p)
-
-		return libc.GoString(p)
+		return goString(tls, ctx, vr)
 	}
 
 	return ""
@@ -1196,12 +1212,8 @@ func ErrorFromValue(v Value) *Error {
 	tls := v.vm.runtime.tls
 	ctx := v.vm.cContext
 
-	p := lib.XToCString(tls, ctx, v.v)
-	raw := libc.GoString(p)
-	lib.XJS_FreeCString(tls, ctx, p)
-
 	return &Error{
-		raw:          raw,
+		raw:          goString(tls, ctx, v.v),
 		Name:         errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&nameC[0]))),
 		Message:      errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&messageC[0]))),
 		Stack:        errStrProp(tls, ctx, v.v, uintptr(unsafe.Pointer(&stackC[0]))),
@@ -2021,12 +2033,8 @@ func (v Value) MarshalJSON() (r []byte, err error) {
 		return nil, v.vm.errFromException()
 	}
 
-	p := lib.XToCString(tls, ctx, json)
-	l := libc.Xstrlen(tls, p)
-
-	defer lib.XJS_FreeCString(tls, ctx, p)
-
-	return libc.GoBytes(p, int(l)), nil
+	// A copy: the JS buffer is released before this returns.
+	return []byte(goString(tls, ctx, json)), nil
 }
 
 // Dup returns a copy of 'v' while updating its reference count.
