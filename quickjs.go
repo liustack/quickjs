@@ -471,10 +471,20 @@ func (m *VM) SetCanBlock(value bool) {
 	lib.XJS_SetCanBlock(m.runtime.tls, m.runtime.cRuntime, n)
 }
 
-// Close releases the resources held by 'm'.
+// Close releases the resources held by 'm'. That includes the module loader
+// and normalizer set by [VM.SetModuleLoader]: Close removes them, so a closed
+// VM keeps nothing they close over reachable.
 func (m *VM) Close() error {
 	tls := m.runtime.tls
 	ctx := m.cContext
+
+	// SetModuleLoader files the loader process-wide under the runtime
+	// pointer, which is freed below and may be reused by a later runtime.
+	// Drop the entry first, so the closures - and whatever host they
+	// capture - do not outlive the VM. Nothing in the teardown loads a module.
+	customLoadersMu.Lock()
+	delete(customLoaders, m.runtime.cRuntime)
+	customLoadersMu.Unlock()
 
 	var freed []*goFunc
 	goFuncsMu.Lock()
@@ -2331,8 +2341,9 @@ func jsMallocString(tls *libc.TLS, ctx uintptr, s string) uintptr {
 }
 
 // SetModuleLoader configures custom Go functions to load and normalize Javascript modules.
-// Passing nil for 'loader' removes the custom loader. If 'normalize' is nil, the engine
-// falls back to the default QuickJS module normalizer.
+// Passing nil for 'loader' removes the custom loader, and so does Close; until then the
+// engine keeps 'loader' and 'normalize', and whatever they close over, reachable. If
+// 'normalize' is nil, the engine falls back to the default QuickJS module normalizer.
 func (m *VM) SetModuleLoader(loader ModuleLoaderFunc, normalize ModuleNormalizeFunc) {
 	customLoadersMu.Lock()
 	defer customLoadersMu.Unlock()

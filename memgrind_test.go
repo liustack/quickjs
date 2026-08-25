@@ -114,6 +114,8 @@ func TestMemgrind2(t *testing.T) {
 	t.Run("mapValueResult", TestRegisterFuncMapValueResult)
 	t.Run("then", TestThenLeak)
 	t.Run("nul", TestStringNUL)
+	t.Run("customLoader", TestCustomModuleLoader)
+	t.Run("closeLoader", TestCloseReleasesModuleLoader)
 
 	if err := libc.MemAuditReport(); err != nil {
 		t.Fatal(err)
