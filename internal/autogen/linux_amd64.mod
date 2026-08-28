@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	golang.org/x/mod v0.38.0
 	modernc.org/fileutil v1.4.0
-	modernc.org/libc v1.75.4
+	modernc.org/libc v1.75.6
 	modernc.org/libquickjs v0.13.1
 )
 
