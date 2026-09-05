@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	golang.org/x/mod v0.38.0
 	modernc.org/fileutil v1.4.0
-	modernc.org/libc v1.75.3
+	modernc.org/libc v1.75.7
 	modernc.org/libquickjs v0.13.1
 )
 
@@ -17,5 +17,5 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.12.0 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )
