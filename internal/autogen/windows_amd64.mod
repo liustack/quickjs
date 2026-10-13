@@ -5,12 +5,12 @@ go 1.26.0
 require (
 	golang.org/x/mod v0.41.0
 	modernc.org/fileutil v1.4.0
-	modernc.org/libc v1.77.1
+	modernc.org/libc v1.78.0
 	modernc.org/libquickjs v0.13.1
 )
 
 require (
-	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
