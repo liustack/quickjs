@@ -1,0 +1,75 @@
+# The kept block on darwin/amd64, on a wip branch only.
+name: probe
+
+on:
+  push:
+    branches: [wip/fmt-pieces-probe]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+  GOARCH: amd64
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [go.mod, "1.26.6"]
+    runs-on: macos-15
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Show the machine
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          sysctl -n sysctl.proc_translated || true
+      - uses: actions/setup-go@v7
+        if: matrix.go == 'go.mod'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-go@v7
+        if: matrix.go != 'go.mod'
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Build the tests of three trees
+        run: |
+          go version
+          for c in 0a7365eb 14321d89; do mkdir -p "$RUNNER_TEMP/t-$c" && git archive $c | tar -x -C "$RUNNER_TEMP/t-$c" && cp intl/zz_warm_test.go "$RUNNER_TEMP/t-$c/intl/" && (cd "$RUNNER_TEMP/t-$c" && go test -c -o "$RUNNER_TEMP/intl-$c.test" ./intl); done
+          go test -c -o "$RUNNER_TEMP/intl-head.test" ./intl
+          for p in fmt internal/hostmem; do go test -c -o "$RUNNER_TEMP/$(basename $p).test" ./$p; done
+      - name: The first word 40 times in a row, in each tree, three rounds
+        continue-on-error: true
+        working-directory: intl
+        run: |
+          for r in 1 2 3; do for c in 0a7365eb 14321d89 head; do echo "round $r $c"; "$RUNNER_TEMP/intl-$c.test" -test.v -test.run TestZZWarm 2>&1 | grep -E "first word|FAIL"; done; done
+      - name: hostmem
+        continue-on-error: true
+        working-directory: internal/hostmem
+        run: |
+          "$RUNNER_TEMP/hostmem.test" -test.v -test.run 'Take|Keep' 2>&1 | grep -v '^=== RUN'
+      - name: The first word alone, 30 times
+        continue-on-error: true
+        working-directory: intl
+        run: |
+          "$RUNNER_TEMP/intl-head.test" -test.short -test.v -test.count=30 -test.run 'TestLongCallsStopAtEveryTimeout/the_first_word' 2>&1 | grep -v '^=== RUN'
+      - name: Every timeout of the first word
+        continue-on-error: true
+        working-directory: intl
+        run: |
+          "$RUNNER_TEMP/intl-head.test" -test.v -test.count=3 -test.run 'TestLongCallsStopAtEveryTimeout/the_first_word' 2>&1 | grep -v '^=== RUN'
+      - name: The tests of intl and fmt under -short
+        continue-on-error: true
+        run: |
+          (cd fmt && "$RUNNER_TEMP/fmt.test" -test.short 2>&1 | tail -20)
+          (cd intl && "$RUNNER_TEMP/intl-head.test" -test.short 2>&1 | tail -20)
