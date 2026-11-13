@@ -374,6 +374,10 @@ size_t JS_GetMemorySize(JSRuntime *rt);
 /* The host calls this right after JS_NewRuntime when it can remap a chunk (see
    HOST_CALL_MEMORY_REMAP in host.h). Off by default. */
 void JS_SetHostRemap(JSRuntime *rt, int on);
+/* The word where the host writes how many bytes it holds for the VM
+   outside the heap, which the memory limit counts (engine/host.h,
+   HOST_CALL_MEMORY_PRESSURE). 0 at first. */
+size_t *JS_GetHostHeld(JSRuntime *rt);
 size_t JS_GetGCThreshold(JSRuntime *rt);
 /* give the free memory back to the host except keep bytes: JS_ReleaseStart,
    then JS_ReleaseNextChunk until its length is 0 and JS_ReleaseNextRange

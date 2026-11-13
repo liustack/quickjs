@@ -89,6 +89,9 @@ typedef struct HostVM {
     long refuse_at;   /* the request with this number is refused (1 is the first), 0 for none */
     int refuse_all;   /* every request is refused */
     size_t most;      /* the most bytes it ever held */
+    long pressures;   /* requests to give back what it holds for the VM */
+    size_t held_after; /* what it still holds after one */
+    size_t pressed;   /* the size of the request of the last one */
 } HostVM;
 
 static HostVM vms[MAX_VM];
@@ -215,7 +218,9 @@ static void *host_remap_by_system(uintptr_t addr, size_t old, size_t size)
 }
 
 /* host_call: the heap gives back a dedicated chunk (HOST_CALL_MEMORY_RELEASE),
-   and abort, which a failed assert of the heap calls (the test ends there). */
+   remaps one (HOST_CALL_MEMORY_REMAP), asks the host to give back what it
+   holds for the VM (HOST_CALL_MEMORY_PRESSURE), and abort, which a failed
+   assert of the heap calls (the test ends there). */
 JSValue host_call(uint32_t vm, const JSValue *this_val, int argc, JSValueConst *argv, int magic)
 {
     if (this_val) {
@@ -269,6 +274,13 @@ JSValue host_call(uint32_t vm, const JSValue *this_val, int argc, JSValueConst *
         if (h->live > h->most)
             h->most = h->live;
         return HOST_WORD(p);
+    }
+    if (magic == HOST_CALL_MEMORY_PRESSURE && argc == 1) {
+        HostVM *h = &vms[vm];
+
+        h->pressures++;
+        h->pressed = HOST_WORD_VALUE(argv[0]);
+        return HOST_WORD(h->held_after);
     }
     fprintf(stderr, "heap-test: the heap called abort (host_call %d)\n", magic);
     fflush(stderr);
@@ -1584,6 +1596,9 @@ static void scenario_dedicated(void)
 
     heap_model_start(&m);
     h = m.h;
+    /* a resize past the room moves the block: a host that remaps is
+       scenario_remap's */
+    heap_set_remap(h, 0);
     host = &vms[m.vm];
     fp = h->footprint;
     count = h->count;
@@ -3162,9 +3177,64 @@ static void scenario_move_stop(void)
     ok("move stop: a block that moves stops at each read of the flag, the heap and the block as they were");
 }
 
+/* What the host holds for the VM counts against the limit with count. A
+   request that fits only without it makes the heap ask the host once to give
+   it back, and the heap takes what the host still holds: the request passes
+   when that is little enough. A request that does not fit even without it
+   asks nothing, nor does one that fits with it. */
+static void scenario_held(void)
+{
+    HeapModel m;
+    JSHeap *h;
+    HostVM *host;
+    void *p, *q;
+    size_t count;
+
+    heap_model_start(&m);
+    h = m.h;
+    host = &vms[m.vm];
+    count = h->count;
+    h->limit = count + 2000;
+    h->held = 1000;
+    host->held_after = 1000;
+    p = heap_alloc(h, 900);
+    CHECK(p && host->pressures == 0, "a request that fits with what the host holds asked it to give back");
+    heap_free(h, p);
+    CHECK(!heap_alloc(h, 1500) && host->pressures == 1 && host->pressed == 1500 && h->held == 1000 && h->count == count,
+          "a request that fits only without what the host holds, which the host kept: %ld asks", host->pressures);
+    CHECK(!heap_alloc(h, 2001) && host->pressures == 1, "a request over the limit alone asked the host");
+    host->held_after = 0;
+    p = heap_alloc(h, 1500);
+    CHECK(p && host->pressures == 2 && h->held == 0, "a request that fits once the host gave back failed");
+    heap_free(h, p);
+
+    /* a resize counts the old block once, as without held */
+    h->held = 300;
+    host->held_after = 300;
+    p = heap_alloc(h, 1000);
+    CHECK(p && host->pressures == 2, "alloc 1000 under the limit with held");
+    q = heap_realloc(h, p, 1800);
+    CHECK(!q && host->pressures == 3 && h->held == 300 && heap_usable_size(p) >= 1000, "a resize that fits only without held, which the host kept, passed");
+    host->held_after = 100;
+    q = heap_realloc(h, p, 1800);
+    CHECK(q && host->pressures == 4 && h->held == 100, "a resize that fits once the host gave part back failed");
+    CHECK(h->count + h->held <= h->limit, "count %zu and held %zu pass the limit %zu", h->count, h->held, h->limit);
+    heap_free(h, q);
+
+    /* held past the limit fails every request, and the host is asked */
+    h->held = h->limit;
+    host->held_after = h->limit;
+    CHECK(!heap_alloc(h, 8) && host->pressures == 5, "a request with held at the limit");
+    h->held = 0;
+    h->limit = (size_t)-1;
+    heap_model_finish(&m);
+    ok("what the host holds counts against the limit, and the host gives it back on a request that needs it");
+}
+
 static void scenarios(void)
 {
     scenario_limit();
+    scenario_held();
     scenario_budget();
     scenario_host_refuses();
     scenario_chunks();

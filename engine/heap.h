@@ -54,6 +54,7 @@ typedef struct JSHeap {
     size_t rt_size;            /* the runtime, which is part of count and not a block */
     size_t count;              /* the runtime and the blocks in use, and for each block its size and the 8 byte size word before it: MemorySize, what the limit and the GC count */
     size_t limit;              /* (size_t)-1 for none */
+    size_t held;               /* bytes the host holds for the VM outside the heap, which the limit counts with count (JS_GetHostHeld) */
     size_t blocks;             /* blocks in use, the runtime not counted */
     size_t footprint;          /* the sum of the chunks, shared and dedicated */
     size_t footprint_limit;    /* 0 for none. Only stops growth, never takes memory back */
@@ -85,8 +86,8 @@ void heap_destroy(JSHeap *h);
 void heap_set_remap(JSHeap *h, int on);
 
 /* Like malloc, free and realloc, for a size of at least 1 and at most
-   JS_HEAP_MAX_REQUEST. They fail (NULL) when count plus the size would pass
-   the limit, when a new chunk is needed and the budget or the host refuses
+   JS_HEAP_MAX_REQUEST. They fail (NULL) when count plus held plus the size
+   would pass the limit, when a new chunk is needed and the budget or the host refuses
    it, and for a size over the maximum. A failed heap_realloc leaves the block,
    its content and the count as they were. A block is 8 byte aligned. A block
    too big to share a chunk gets a dedicated chunk, and the chunk goes back to the
@@ -97,7 +98,12 @@ void heap_set_remap(JSHeap *h, int on);
    a GiB does not hold up a stop for the time of its copy. When it is set, the
    new block is given back, the call fails as above, and stopped is set until
    the next heap_realloc: the caller tells a stop from running out of memory
-   by it. */
+   by it.
+
+   When the size would pass the limit with held and not without it, the
+   heap first asks the host to give back what it holds for the VM
+   (HOST_CALL_MEMORY_PRESSURE, see host.h), takes the result as held, and
+   checks the limit again. */
 #define HEAP_COPY_STEP ((size_t)1 << 20)
 void *heap_alloc(JSHeap *h, size_t size);
 void heap_free(JSHeap *h, void *ptr);

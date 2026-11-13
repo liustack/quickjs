@@ -278,6 +278,36 @@ func TestTrap(t *testing.T) {
 	}
 }
 
+// CallMemoryPressure asks the function of SetPressure for what the host
+// holds and returns what it still holds. Hold writes the engine's word, and
+// nothing once the VM is closed. A request with no function set, or with
+// other arguments, is a bug of the engine.
+func TestCallPressure(t *testing.T) {
+	v := newVM(t, small)
+	sp, _ := v.Stack()
+	args := argv(t, v, 12345)
+	mustPanic(t, "pressure with no function", func() { Call(sp, v.ID(), 0, 1, args, CallMemoryPressure) })
+	var asked uintptr
+	v.SetPressure(func(request uintptr) uintptr { asked = request; return 7 })
+	if r := Call(sp, v.ID(), 0, 1, args, CallMemoryPressure); r != Word(7) || asked != 12345 {
+		t.Fatalf("pressure returned %+v and asked %d, want 7 and 12345", r, asked)
+	}
+	mustPanic(t, "pressure with two arguments", func() { Call(sp, v.ID(), 0, 2, args, CallMemoryPressure) })
+
+	mustPanic(t, "Hold before SetHeld", func() { v.Hold(1) })
+	word := MemoryGrow(v.ID(), hostmem.Unit)
+	mustPanic(t, "a word that is not aligned", func() { v.SetHeld(word + 4) })
+	v.SetHeld(word)
+	v.Hold(4096)
+	if got := *(*uintptr)(addr(word)); got != 4096 {
+		t.Fatalf("Hold wrote %d, want 4096", got)
+	}
+	if err := v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	v.Hold(1) // the memory is gone: nothing is written
+}
+
 func TestCallUnknown(t *testing.T) {
 	v := newVM(t, small)
 	sp, _ := v.Stack()
@@ -293,7 +323,7 @@ func TestCallEngineRequestHasNoThis(t *testing.T) {
 	v := newVM(t, small)
 	sp, _ := v.Stack()
 	args := sp + 64
-	for _, magic := range []int32{CallAbort, CallMemoryRelease, CallMemoryRemap, -99} {
+	for _, magic := range []int32{CallAbort, CallMemoryRelease, CallMemoryRemap, CallMemoryPressure, -99} {
 		got := mustPanic(t, "a request with a this value", func() { Call(sp, v.ID(), args, 2, args, magic) })
 		if s, ok := got.(string); !ok || !strings.Contains(s, "this value") {
 			t.Errorf("request %d panicked with %v, want the this value named", magic, got)

@@ -56,11 +56,29 @@ size_t heap_usable_size(const void *ptr)
     return tlsf_block_size((void *)ptr);
 }
 
-/* Would count become base plus request, past the limit? The limit may be
-   below the count (it can be lowered), and request may be huge: subtract. */
+/* Would count become base plus request, past the limit with what the host
+   holds? The limit may be below the count (it can be lowered), and request
+   may be huge: subtract. */
 static int heap_over(const JSHeap *h, size_t base, size_t request)
 {
-    return base > h->limit || request > h->limit - base;
+    return base > h->limit || h->held > h->limit - base || request > h->limit - base - h->held;
+}
+
+/* heap_over, after the host gave back what it holds for the VM when that
+   is all that keeps the request from fitting (HOST_CALL_MEMORY_PRESSURE).
+   The host returns what it still holds. */
+static int heap_over_held(JSHeap *h, size_t base, size_t request)
+{
+    JSValue argv[1], ret;
+
+    if (!heap_over(h, base, request))
+        return 0;
+    if (!h->held || base > h->limit || request > h->limit - base)
+        return 1;
+    argv[0] = HOST_WORD(request);
+    ret = host_call(h->vm, NULL, 1, argv, HOST_CALL_MEMORY_PRESSURE);
+    h->held = HOST_WORD_VALUE(ret);
+    return heap_over(h, base, request);
 }
 
 JSHeap *heap_create(uint32_t vm, size_t rt_size)
@@ -310,7 +328,7 @@ void *heap_alloc(JSHeap *h, size_t size)
 {
     void *p;
 
-    if (size == 0 || size > JS_HEAP_MAX_REQUEST || heap_over(h, h->count, size))
+    if (size == 0 || size > JS_HEAP_MAX_REQUEST || heap_over_held(h, h->count, size))
         return NULL;
     p = heap_take(h, size, 0);
     if (!p)
@@ -448,7 +466,7 @@ void *heap_realloc(JSHeap *h, void *ptr, size_t size)
        as upstream checks a resize: the 8 byte size word of the block stays in
        count, since the block is still a block after the resize */
     base = h->count - old_size;
-    if (heap_over(h, base, size))
+    if (heap_over_held(h, base, size))
         return NULL;
     c = heap_dedicated_of(h, ptr, &link);
     if (c && size <= heap_dedicated_room(c) && size >= heap_dedicated_room(c) / 2) {

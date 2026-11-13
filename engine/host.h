@@ -49,6 +49,13 @@ enum {
        ask for this, so the host never has to say it cannot. Linux: mremap with
        MREMAP_MAYMOVE. */
     HOST_CALL_MEMORY_REMAP = -3,   /* (address, old size, new size): make the dedicated chunk new size bytes (a multiple of 64 KiB, bigger), where it is or elsewhere, with its content. The result is the address of the chunk as a word, or 0 when the system has no memory, and then the chunk is as it was: the engine takes that as out of memory and does not try to copy */
+    /* The host may hold memory for the VM outside the heap and have the
+       limit count it: it writes how many bytes to the word of
+       JS_GetHostHeld. When a request of the heap would pass the limit with
+       that memory and not without it, the engine asks the host to give it
+       back, once per request. It runs no user code and does not call back
+       into the engine. */
+    HOST_CALL_MEMORY_PRESSURE = -4, /* (size of the request): give back what the host holds for the VM. The result is the bytes it still holds, as a word: the engine takes it as the new value of the word, and fails the request when it still does not fit */
 };
 JSValue host_call(uint32_t vm, const JSValue *this_val, int argc, JSValueConst *argv, int magic);
 
